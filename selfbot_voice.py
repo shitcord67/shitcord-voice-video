@@ -32,6 +32,7 @@ class VoiceSelfClient(discord.Client):
         self._last_dave_status = "DAVE: not checked"
         self._debug_lines: list[str] = []
         self._recent_targets: list[dict] = []
+        self._log_file: Optional[str] = args.log_file
 
     async def on_ready(self):
         try:
@@ -612,9 +613,20 @@ class VoiceSelfClient(discord.Client):
 
     def _dbg(self, msg: str) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
-        self._debug_lines.append(f"[{ts}] {msg}")
+        line = f"[{ts}] {msg}"
+        self._debug_lines.append(line)
         if len(self._debug_lines) > 500:
             self._debug_lines = self._debug_lines[-500:]
+        self._append_log_line(line)
+
+    def _append_log_line(self, line: str) -> None:
+        if not self._log_file:
+            return
+        try:
+            with open(self._log_file, "a", encoding="utf-8") as f:
+                f.write(line + "\n")
+        except Exception:
+            return
 
     async def _connect_dm_by_user_id(self, user_id: int) -> None:
         voice, label = await self._open_dm_connection_by_id(user_id)
@@ -1156,6 +1168,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="discord.py-self voice helper")
     parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, help=f"Path to local config json (default: {DEFAULT_CONFIG_PATH})")
     parser.add_argument("--token", help="Discord user token (or set DISCORD_USER_TOKEN)")
+    parser.add_argument("--log-file", default=None, help="Append debug/errors to this file")
 
     sub = parser.add_subparsers(dest="command", required=True)
 
@@ -1238,6 +1251,13 @@ def main() -> int:
         asyncio.run(_run(args))
         return 0
     except Exception as exc:  # pylint: disable=broad-except
+        if args.log_file:
+            try:
+                ts = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                with open(args.log_file, "a", encoding="utf-8") as f:
+                    f.write(f"[{ts}] fatal: {exc!r}\n")
+            except Exception:
+                pass
         print(f"Error: {exc}", file=sys.stderr)
         return 1
 
