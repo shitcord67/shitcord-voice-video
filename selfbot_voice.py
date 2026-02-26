@@ -31,6 +31,7 @@ class VoiceSelfClient(discord.Client):
         self._done = asyncio.Event()
         self._last_dave_status = "DAVE: not checked"
         self._debug_lines: list[str] = []
+        self._recent_targets: list[dict] = []
 
     async def on_ready(self):
         try:
@@ -153,7 +154,7 @@ class VoiceSelfClient(discord.Client):
                 choice = self._curses_menu(
                     stdscr,
                     "Main",
-                    ["Connect DM", "Connect Guild", "Find User in Voice", "Audio Settings", "Quit"],
+                    ["Connect DM", "Connect Guild", "Recent", "Find User in Voice", "Audio Settings", "Quit"],
                 )
                 if choice == 0:
                     target = self._curses_menu(stdscr, "DM", ["Input ID", "List", f"Toggle Ring ({'ON' if self.args.ring else 'OFF'})", "Back"])
@@ -241,10 +242,14 @@ class VoiceSelfClient(discord.Client):
                                 except Exception as e:
                                     self._curses_message(stdscr, f"Error: {e}")
                 elif choice == 2:
-                    conn = self._ctui_find_user_in_voice(stdscr, loop)
+                    conn = self._ctui_connect_recent(stdscr, loop)
                     if conn is not None:
                         voice, label = conn
                 elif choice == 3:
+                    conn = self._ctui_find_user_in_voice(stdscr, loop)
+                    if conn is not None:
+                        voice, label = conn
+                elif choice == 4:
                     self._ctui_audio_settings(stdscr)
                 else:
                     return
@@ -455,13 +460,21 @@ class VoiceSelfClient(discord.Client):
             return
         self._show_sixel_from_url(stdscr, str(guild.icon.url), f"Guild Icon: {guild.name}")
 
+    def _ctui_preview_user(self, stdscr, user: discord.abc.User) -> None:
+        self._show_sixel_from_url(stdscr, str(user.display_avatar.url), f"User Avatar: {user}")
+
     def _ctui_show_voice_members(self, stdscr, channel: discord.VoiceChannel) -> None:
         members = sorted(channel.members, key=lambda m: str(m).lower())
         if not members:
             self._curses_message(stdscr, f"No users in {channel.name}.")
             return
         labels = [f"{m} ({m.id})" for m in members]
-        self._curses_menu(stdscr, f"Users in {channel.name} (search enabled)", labels + ["Back"])
+        self._curses_menu(
+            stdscr,
+            f"Users in {channel.name} (search, p=avatar)",
+            labels + ["Back"],
+            preview_callback=lambda i: self._ctui_preview_user(stdscr, members[i]) if i < len(members) else None,
+        )
 
     def _ctui_find_user_in_voice(self, stdscr, loop: asyncio.AbstractEventLoop):
         entries = []
@@ -474,7 +487,12 @@ class VoiceSelfClient(discord.Client):
             return None
 
         labels = [f"{m} ({m.id}) -> {g.name}/{ch.name}" for m, g, ch in entries]
-        idx = self._curses_menu(stdscr, "Find user in voice (type name/id)", labels + ["Back"])
+        idx = self._curses_menu(
+            stdscr,
+            "Find user in voice (type name/id, p=avatar)",
+            labels + ["Back"],
+            preview_callback=lambda i: self._ctui_preview_user(stdscr, entries[i][0]) if i < len(entries) else None,
+        )
         if idx >= len(entries):
             return None
 
@@ -589,6 +607,13 @@ class VoiceSelfClient(discord.Client):
         print(f"Connecting to DM call with {user} (ring={self.args.ring})...")
         voice = await dm.connect(reconnect=True, ring=self.args.ring)
         await self._after_connect_dave_checks(voice)
+        self._remember_recent(
+            {
+                "kind": "dm",
+                "user_id": user.id,
+                "label": f"DM:{user} ({user.id})",
+            }
+        )
         return voice, f"DM:{user}"
         await self._handle_connected_voice(voice, label)
 
@@ -628,7 +653,56 @@ class VoiceSelfClient(discord.Client):
         print(f"Connecting to {guild.name}/{channel.name}...")
         voice = await channel.connect(reconnect=True, self_deaf=False, self_mute=False)
         await self._after_connect_dave_checks(voice)
+        self._remember_recent(
+            {
+                "kind": "guild",
+                "guild_id": guild.id,
+                "channel_id": channel.id,
+                "label": f"{guild.name}/{channel.name} ({guild.id}/{channel.id})",
+            }
+        )
         return voice, f"{guild.name}/{channel.name}"
+
+    def _remember_recent(self, entry: dict) -> None:
+        entry = dict(entry)
+        entry["ts"] = datetime.now().isoformat(timespec="seconds")
+        self._recent_targets = [
+            e
+            for e in self._recent_targets
+            if not (
+                e.get("kind") == entry.get("kind")
+                and e.get("user_id") == entry.get("user_id")
+                and e.get("guild_id") == entry.get("guild_id")
+                and e.get("channel_id") == entry.get("channel_id")
+            )
+        ]
+        self._recent_targets.insert(0, entry)
+        self._recent_targets = self._recent_targets[:30]
+        self._dbg(f"recent add: {entry.get('label')}")
+
+    def _ctui_connect_recent(self, stdscr, loop: asyncio.AbstractEventLoop):
+        if not self._recent_targets:
+            self._curses_message(stdscr, "No recent targets yet.")
+            return None
+        labels = [f"[{e.get('ts')}] {e.get('label')}" for e in self._recent_targets]
+        idx = self._curses_menu(stdscr, "Recent targets (type to search)", labels + ["Back"])
+        if idx >= len(self._recent_targets):
+            return None
+        entry = self._recent_targets[idx]
+        try:
+            if entry.get("kind") == "dm":
+                return asyncio.run_coroutine_threadsafe(
+                    self._open_dm_connection_by_id(int(entry["user_id"])), loop
+                ).result()
+            if entry.get("kind") == "guild":
+                return asyncio.run_coroutine_threadsafe(
+                    self._open_guild_connection(int(entry["guild_id"]), int(entry["channel_id"])), loop
+                ).result()
+        except Exception as e:
+            self._curses_message(stdscr, f"Error: {e}")
+            return None
+        self._curses_message(stdscr, "Unknown recent target type.")
+        return None
 
     async def _connect_guild_from_list(self) -> None:
         guilds = sorted(self.guilds, key=lambda g: g.name.lower())

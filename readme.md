@@ -76,3 +76,5 @@ example:
 
 if you still want to force native capture (unsafe):
 `VOICE_CAPTURE=1 VOICE_CAPTURE_BACKEND=native VOICE_CAPTURE_FILE=./recv.ogg node example.js <token> <guild id> <channel id>`
+
+press `p` in voice-user/member lists for SIXEL user avatar preview.
