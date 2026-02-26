@@ -8,9 +8,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.request
 from datetime import datetime
-from typing import Callable, Optional
+from typing import Any, Callable, Optional
 
 import discord
 
@@ -33,6 +34,8 @@ class VoiceSelfClient(discord.Client):
         self._debug_lines: list[str] = []
         self._recent_targets: list[dict] = []
         self._log_file: Optional[str] = args.log_file
+        self._speaking_activity: dict[int, float] = {}
+        self._active_notice: Optional[dict[str, Any]] = None
 
     async def on_ready(self):
         try:
@@ -50,6 +53,68 @@ class VoiceSelfClient(discord.Client):
                 print(f"Unknown command: {self.args.command}")
         finally:
             self._done.set()
+
+    async def on_call_create(self, call) -> None:
+        self._handle_call_event(call, "create")
+
+    async def on_call_update(self, old_call, call) -> None:
+        was_ringing = self._is_ringing_me(old_call)
+        now_ringing = self._is_ringing_me(call)
+        if now_ringing and not was_ringing:
+            self._handle_call_event(call, "incoming")
+
+    async def on_call_delete(self, call) -> None:
+        self._dbg(f"call ended in channel {getattr(call.channel, 'id', '?')}")
+
+    def _is_ringing_me(self, call) -> bool:
+        me = self.user
+        if me is None:
+            return False
+        try:
+            return any(int(u.id) == int(me.id) for u in getattr(call, "ringing", []))
+        except Exception:
+            return False
+
+    def _handle_call_event(self, call, event_name: str) -> None:
+        if not self._is_ringing_me(call):
+            return
+        peer = getattr(getattr(call, "channel", None), "recipient", None)
+        peer_label = str(peer) if peer is not None else f"channel:{getattr(getattr(call, 'channel', None), 'id', '?')}"
+        initiator = getattr(call, "initiator", None)
+        from_label = str(initiator) if initiator is not None else "unknown"
+        msg = f"Incoming call from {from_label} in DM:{peer_label}"
+        self._push_notice(msg)
+        self._emit_call_sound()
+        print(msg)
+        self._dbg(f"call {event_name}: {msg}")
+
+    def _push_notice(self, message: str) -> None:
+        persistent = bool(getattr(self.args, "call_notify_persistent", False))
+        seconds = max(0.0, float(getattr(self.args, "call_notify_seconds", 15.0)))
+        expires_at = None if persistent else (time.monotonic() + seconds)
+        self._active_notice = {"message": message, "expires_at": expires_at}
+
+    def _current_notice(self) -> Optional[str]:
+        if not self._active_notice:
+            return None
+        exp = self._active_notice.get("expires_at")
+        if exp is not None and time.monotonic() > exp:
+            self._active_notice = None
+            return None
+        return str(self._active_notice.get("message") or "")
+
+    def _emit_call_sound(self) -> None:
+        cmd = getattr(self.args, "call_notify_cmd", None)
+        if cmd:
+            try:
+                subprocess.Popen(cmd, shell=True)
+            except Exception as e:
+                self._dbg(f"call notify cmd failed: {e!r}")
+        if getattr(self.args, "call_notify_sound", False):
+            try:
+                print("\a", end="", flush=True)
+            except Exception:
+                pass
 
     def _print_voice_channels(self) -> None:
         print(f"Logged in as: {self.user} ({self.user.id})")
@@ -151,6 +216,10 @@ class VoiceSelfClient(discord.Client):
     def _ctui_main(self, stdscr, loop: asyncio.AbstractEventLoop) -> None:
         curses.curs_set(0)
         stdscr.keypad(True)
+        try:
+            curses.mousemask(curses.ALL_MOUSE_EVENTS | curses.REPORT_MOUSE_POSITION)
+        except Exception:
+            pass
         voice = None
         label = ""
 
@@ -164,8 +233,14 @@ class VoiceSelfClient(discord.Client):
                 choice = self._curses_menu(
                     stdscr,
                     "Main",
-                    ["Connect DM", "Connect Guild", "Recent", "Find User in Voice", "Audio Settings", "Quit"],
+                    ["Connect DM", "Connect Guild", "Recent", "Find User in Voice", "Quick Jump", "Audio Settings", "Quit"],
+                    allow_ctrl_k=True,
                 )
+                if choice == -1:
+                    conn = self._ctui_quick_jump(stdscr, loop)
+                    if conn is not None:
+                        voice, label = conn
+                    continue
                 if choice == 0:
                     target = self._curses_menu(stdscr, "DM", ["Input ID", "List", f"Toggle Ring ({'ON' if self.args.ring else 'OFF'})", "Back"])
                     if target == 0:
@@ -260,6 +335,10 @@ class VoiceSelfClient(discord.Client):
                     if conn is not None:
                         voice, label = conn
                 elif choice == 4:
+                    conn = self._ctui_quick_jump(stdscr, loop)
+                    if conn is not None:
+                        voice, label = conn
+                elif choice == 5:
                     self._ctui_audio_settings(stdscr)
                 else:
                     return
@@ -272,12 +351,25 @@ class VoiceSelfClient(discord.Client):
                         "Audio settings",
                         "Show DAVE status",
                         "Show debug log",
+                        "Quick Jump (Ctrl+K)",
                         "Switch target (disconnect)",
                         "Disconnect",
                         "Quit",
                     ],
                     voice=voice,
+                    allow_ctrl_k=True,
                 )
+                if choice == -1:
+                    try:
+                        run(self._disconnect_voice(voice))
+                    except Exception:
+                        pass
+                    voice = None
+                    label = ""
+                    conn = self._ctui_quick_jump(stdscr, loop)
+                    if conn is not None:
+                        voice, label = conn
+                    continue
                 if choice == 0:
                     try:
                         run(self._restart_playback(voice, label))
@@ -294,7 +386,17 @@ class VoiceSelfClient(discord.Client):
                         self._curses_message(stdscr, f"Error: {e}")
                 elif choice == 3:
                     self._curses_show_debug_log(stdscr)
-                elif choice in (4, 5):
+                elif choice == 4:
+                    try:
+                        run(self._disconnect_voice(voice))
+                    except Exception:
+                        pass
+                    voice = None
+                    label = ""
+                    conn = self._ctui_quick_jump(stdscr, loop)
+                    if conn is not None:
+                        voice, label = conn
+                elif choice in (5, 6):
                     try:
                         run(self._disconnect_voice(voice))
                     except Exception:
@@ -370,6 +472,7 @@ class VoiceSelfClient(discord.Client):
         voice: Optional[discord.VoiceClient] = None,
         preview_callback: Optional[Callable[[int], None]] = None,
         key_actions: Optional[dict[int, Callable[[int], None]]] = None,
+        allow_ctrl_k: bool = False,
     ) -> int:
         idx = 0
         query = ""
@@ -381,19 +484,33 @@ class VoiceSelfClient(discord.Client):
                 idx = 0
             stdscr.clear()
             self._safe_addstr(stdscr, 0, 0, title)
+            header_start = 1
+            notice = self._current_notice()
+            if notice:
+                self._safe_addstr(stdscr, 1, 0, f"NOTIFY: {notice}")
+                header_start = 2
             if title.startswith("Connected:"):
                 status = self._collect_voice_status(voice)
-                self._curses_add_wrapped(stdscr, 1, 0, status)
-                self._curses_add_wrapped(stdscr, 2, 0, self._last_dave_status)
-                self._curses_add_wrapped(stdscr, 3, 0, self._collect_audio_status())
-                base = 6
+                self._curses_add_wrapped(stdscr, header_start + 0, 0, status)
+                self._curses_add_wrapped(stdscr, header_start + 1, 0, self._last_dave_status)
+                self._curses_add_wrapped(stdscr, header_start + 2, 0, self._collect_audio_status())
+                base = header_start + 5
             else:
-                base = 3
+                base = header_start + 2
             self._safe_addstr(stdscr, base - 1, 0, f"Search: {query}")
             render_items = [items[i] for i in filtered] if filtered else ["(no results)"]
             for i, item in enumerate(render_items):
                 prefix = "> " if i == idx else "  "
                 self._safe_addstr(stdscr, base + i, 0, f"{prefix}{item}")
+
+            if title.startswith("Connected:"):
+                users_header_y = base + len(render_items) + 1
+                self._safe_addstr(stdscr, users_header_y, 0, "Connected users (talk/mic/spk):")
+                max_y, _ = stdscr.getmaxyx()
+                rows_left = max(0, max_y - users_header_y - 1)
+                user_lines = self._collect_connected_user_lines(voice, limit=rows_left)
+                for row, line in enumerate(user_lines, start=users_header_y + 1):
+                    self._safe_addstr(stdscr, row, 0, line)
             stdscr.refresh()
             ch = stdscr.getch()
             if ch in (curses.KEY_UP, ord("k")):
@@ -404,9 +521,20 @@ class VoiceSelfClient(discord.Client):
                     idx = (idx + 1) % len(filtered)
             elif ch in (curses.KEY_BACKSPACE, 127, 8):
                 query = query[:-1]
+            elif allow_ctrl_k and ch == 11:  # Ctrl+K
+                return -1
             elif ch in (ord("p"), ord("P")):
                 if preview_callback and filtered:
                     preview_callback(filtered[idx])
+            elif ch == curses.KEY_MOUSE:
+                try:
+                    _, _, my, _, bstate = curses.getmouse()
+                except Exception:
+                    continue
+                if bstate & (curses.BUTTON1_CLICKED | curses.BUTTON1_PRESSED | curses.BUTTON1_RELEASED):
+                    pick = my - base
+                    if 0 <= pick < len(render_items) and filtered:
+                        return filtered[pick]
             elif key_actions and ch in key_actions:
                 if filtered:
                     key_actions[ch](filtered[idx])
@@ -640,6 +768,38 @@ class VoiceSelfClient(discord.Client):
             f"mode=connect sink={getattr(self.args, 'pulse_sink', None) or 'current'}"
         )
 
+    def _collect_connected_user_lines(self, voice: Optional[discord.VoiceClient], *, limit: int) -> list[str]:
+        if limit <= 0:
+            return []
+        if voice is None:
+            return ["  (disconnected)"][:limit]
+        channel = getattr(voice, "channel", None)
+        members = getattr(channel, "members", None)
+        if not members:
+            return ["  (no members visible)"][:limit]
+
+        lines: list[str] = []
+        for member in sorted(members, key=lambda m: str(m).lower()):
+            vs = getattr(member, "voice", None)
+            mic_muted = bool(getattr(vs, "self_mute", False) or getattr(vs, "mute", False) or getattr(vs, "suppress", False))
+            spk_deaf = bool(getattr(vs, "self_deaf", False) or getattr(vs, "deaf", False))
+            talking = self._is_user_talking(member.id)
+            talk_mark = "*" if talking else "."
+            mic_mark = "MUTED" if mic_muted else "open"
+            spk_mark = "DEAF" if spk_deaf else "on"
+            lines.append(f"  {talk_mark} mic={mic_mark:<5} spk={spk_mark:<4} {member} ({member.id})")
+            if len(lines) >= limit:
+                break
+        if not lines:
+            lines.append("  (no members visible)")
+        return lines[:limit]
+
+    def _is_user_talking(self, user_id: int) -> bool:
+        ts = self._speaking_activity.get(int(user_id))
+        if ts is None:
+            return False
+        return (time.monotonic() - ts) <= 1.8
+
     def _dbg(self, msg: str) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
         line = f"[{ts}] {msg}"
@@ -670,6 +830,7 @@ class VoiceSelfClient(discord.Client):
             raise RuntimeError(f"Could not open DM channel with user {user_id}")
         print(f"Connecting to DM call with {user} (ring={self.args.ring})...")
         voice = await dm.connect(reconnect=True, ring=self.args.ring)
+        self._attach_voice_ws_hook(voice)
         await self._after_connect_dave_checks(voice)
         self._remember_recent(
             {
@@ -716,6 +877,7 @@ class VoiceSelfClient(discord.Client):
             raise RuntimeError(f"Voice channel not found: {channel_id}")
         print(f"Connecting to {guild.name}/{channel.name}...")
         voice = await channel.connect(reconnect=True, self_deaf=False, self_mute=False)
+        self._attach_voice_ws_hook(voice)
         await self._after_connect_dave_checks(voice)
         self._remember_recent(
             {
@@ -744,6 +906,35 @@ class VoiceSelfClient(discord.Client):
         self._recent_targets = self._recent_targets[:30]
         self._dbg(f"recent add: {entry.get('label')}")
 
+    def _attach_voice_ws_hook(self, voice: discord.VoiceClient) -> None:
+        conn = getattr(voice, "_connection", None)
+        ws = getattr(voice, "ws", None)
+        if conn is not None:
+            conn.hook = self._voice_ws_hook
+        if ws is not None:
+            ws._hook = self._voice_ws_hook  # type: ignore[attr-defined]
+
+    async def _voice_ws_hook(self, _ws, msg) -> None:
+        try:
+            op = msg.get("op")
+            data = msg.get("d") or {}
+            if op == 5:  # SPEAKING
+                raw_uid = data.get("user_id")
+                if raw_uid is None:
+                    return
+                uid = int(raw_uid)
+                speaking_val = int(data.get("speaking", 0))
+                if speaking_val != 0:
+                    self._speaking_activity[uid] = time.monotonic()
+                else:
+                    self._speaking_activity.pop(uid, None)
+            elif op == 13:  # CLIENT_DISCONNECT
+                raw_uid = data.get("user_id")
+                if raw_uid is not None:
+                    self._speaking_activity.pop(int(raw_uid), None)
+        except Exception as e:
+            self._dbg(f"voice ws hook error: {e!r}")
+
     def _ctui_connect_recent(self, stdscr, loop: asyncio.AbstractEventLoop):
         if not self._recent_targets:
             self._curses_message(stdscr, "No recent targets yet.")
@@ -766,6 +957,71 @@ class VoiceSelfClient(discord.Client):
             self._curses_message(stdscr, f"Error: {e}")
             return None
         self._curses_message(stdscr, "Unknown recent target type.")
+        return None
+
+    def _ctui_quick_jump(self, stdscr, loop: asyncio.AbstractEventLoop):
+        targets: list[dict] = []
+        for e in self._recent_targets:
+            targets.append(dict(e, recent=True))
+
+        for guild in sorted(self.guilds, key=lambda g: g.name.lower()):
+            for ch in sorted(guild.voice_channels, key=lambda c: c.position):
+                targets.append(
+                    {
+                        "kind": "guild",
+                        "guild_id": guild.id,
+                        "channel_id": ch.id,
+                        "label": f"{guild.name}/{ch.name} ({guild.id}/{ch.id}) members={len(ch.members)}",
+                        "recent": False,
+                    }
+                )
+
+        for dm in sorted(
+            [ch for ch in self.private_channels if isinstance(ch, discord.DMChannel)],
+            key=lambda c: str(c.recipient).lower() if c.recipient else "",
+        ):
+            if dm.recipient is None:
+                continue
+            targets.append(
+                {
+                    "kind": "dm",
+                    "user_id": dm.recipient.id,
+                    "label": f"DM:{dm.recipient} ({dm.recipient.id})",
+                    "recent": False,
+                }
+            )
+
+        deduped: list[dict] = []
+        seen: set[tuple] = set()
+        for t in targets:
+            key = (t.get("kind"), t.get("user_id"), t.get("guild_id"), t.get("channel_id"))
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(t)
+        targets = deduped
+        if not targets:
+            self._curses_message(stdscr, "No quick-jump targets available.")
+            return None
+
+        labels = [f"{'[Recent] ' if t.get('recent') else ''}{t.get('label')}" for t in targets]
+        idx = self._curses_menu(stdscr, "Quick Jump (Ctrl+K)", labels + ["Back"])
+        if idx >= len(targets):
+            return None
+        t = targets[idx]
+        try:
+            if t.get("kind") == "dm":
+                return asyncio.run_coroutine_threadsafe(
+                    self._open_dm_connection_by_id(int(t["user_id"])), loop
+                ).result()
+            if t.get("kind") == "guild":
+                return asyncio.run_coroutine_threadsafe(
+                    self._open_guild_connection(int(t["guild_id"]), int(t["channel_id"])), loop
+                ).result()
+        except Exception as e:
+            self._curses_message(stdscr, f"Error: {e}")
+            return None
+        self._curses_message(stdscr, "Unknown quick-jump target type.")
         return None
 
     async def _connect_guild_from_list(self) -> None:
@@ -1305,6 +1561,10 @@ def parse_args() -> argparse.Namespace:
     ctui.add_argument("--dave-debug", action="store_true", help="Print DAVE negotiation status after connect")
     ctui.add_argument("--require-dave", action="store_true", help="Abort if DAVE is not active/encrypting")
     ctui.add_argument("--dave-wait-timeout", type=float, default=10.0, help="Seconds to wait for DAVE encryption readiness")
+    ctui.add_argument("--call-notify-seconds", type=float, default=15.0, help="Incoming-call notice duration in seconds")
+    ctui.add_argument("--call-notify-persistent", action="store_true", help="Keep incoming-call notice visible until replaced")
+    ctui.add_argument("--call-notify-sound", action="store_true", help="Play terminal bell on incoming call")
+    ctui.add_argument("--call-notify-cmd", default=None, help="Shell command to run on incoming call")
 
     args = parser.parse_args()
     cfg = load_local_config(args.config)
