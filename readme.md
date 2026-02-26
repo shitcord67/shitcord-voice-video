@@ -1,3 +1,16 @@
+<div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px;">
+    <figure>
+        <img src="Fensterfoto_2026-02-26_14-12-11_Xfce4-terminal.png" alt="Screenshot 1" style="width: 100%;">
+    </figure>
+    <figure>
+        <img src="Fensterfoto_2026-02-26_14-14-40_Xfce4-terminal.png" alt="Screenshot 2" style="width: 100%;">
+    </figure>
+    <figure>
+        <img src="Fensterfoto_2026-02-26_14-14-54_Xfce4-terminal.png" alt="Screenshot 3" style="width: 100%;">
+        <figcaption>Don't forget to use "Restart / Apply audio mode" after changing audio settings</figcaption>
+    </figure>
+</div>
+
 # quick start
 preferred: start CTUI via the launcher script (auto-creates/uses `.venv`, installs requirements if needed):
 `./start-selfbot.sh`
