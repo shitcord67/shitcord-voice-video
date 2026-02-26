@@ -303,11 +303,24 @@ class VoiceSelfClient(discord.Client):
             pass
         voice = None
         label = ""
+        startup_done = False
 
         def run(coro):
             return asyncio.run_coroutine_threadsafe(coro, loop).result()
 
         while True:
+            if not startup_done:
+                startup_done = True
+                try:
+                    if getattr(self.args, "start_dm_user_id", None):
+                        voice, label = run(self._open_dm_connection_by_id(int(self.args.start_dm_user_id)))
+                    elif getattr(self.args, "start_guild_id", None) and getattr(self.args, "start_channel_id", None):
+                        voice, label = run(
+                            self._open_guild_connection(int(self.args.start_guild_id), int(self.args.start_channel_id))
+                        )
+                except Exception as e:
+                    self._curses_message(stdscr, f"Startup connect failed: {e}")
+
             stdscr.clear()
             self._safe_addstr(stdscr, 0, 0, f"discord.py-self ctui  user={self.user} ({self.user.id})")
             if voice is None:
@@ -1829,6 +1842,9 @@ def parse_args() -> argparse.Namespace:
     ctui.add_argument("--call-notify-persistent", action="store_true", help="Keep incoming-call notice visible until replaced")
     ctui.add_argument("--call-notify-sound", action="store_true", help="Play terminal bell on incoming call")
     ctui.add_argument("--call-notify-cmd", default=None, help="Shell command to run on incoming call")
+    ctui.add_argument("--start-dm-user-id", type=int, default=None, help="Auto-connect to this DM user at CTUI startup")
+    ctui.add_argument("--start-guild-id", type=int, default=None, help="Auto-connect to this guild at CTUI startup")
+    ctui.add_argument("--start-channel-id", type=int, default=None, help="Auto-connect to this voice channel at CTUI startup")
 
     args = parser.parse_args()
     cfg = load_local_config(args.config)

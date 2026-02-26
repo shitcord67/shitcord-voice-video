@@ -21,6 +21,7 @@ GUILD_ID=""
 CHANNEL_ID=""
 RING=0
 AUDIO_MODE="connect"
+DIRECT=0
 EXTRA_ARGS=()
 
 print_help() {
@@ -33,9 +34,10 @@ Options:
   --ctui                  Start curses UI (default if no target is given)
   --tui                   Start line UI
   --list                  List guilds and voice channels
-  --dm <user_id>          Directly connect to DM call with this user
-  --guild <guild_id>      Guild ID for direct voice connect
-  --channel <channel_id>  Voice channel ID for direct voice connect
+  --dm <user_id>          Preferred: start CTUI and auto-connect this DM call
+  --guild <guild_id>      Preferred: start CTUI and auto-connect this guild voice channel
+  --channel <channel_id>  Channel ID used with --guild
+  --direct                Use direct dm-play/play (no CTUI)
   --ring                  Ring when starting DM call
   --mode <connect|file|noise|mic>
                           Audio mode for direct play/dm-play targets (default: connect)
@@ -63,6 +65,8 @@ while [[ $# -gt 0 ]]; do
       RING=1; shift ;;
     --mode)
       AUDIO_MODE="${2:-}"; shift 2 ;;
+    --direct)
+      DIRECT=1; shift ;;
     -h|--help)
       print_help; exit 0 ;;
     --)
@@ -80,22 +84,45 @@ if [[ -n "$TOKEN" ]]; then
   CMD+=("--token" "$TOKEN")
 fi
 
-if [[ -n "$DM_USER_ID" ]]; then
-  CMD+=("dm-play" "--user-id" "$DM_USER_ID" "--mode" "$AUDIO_MODE")
-  if [[ "$RING" -eq 1 ]]; then
-    CMD+=("--ring")
-  fi
-elif [[ -n "$GUILD_ID" || -n "$CHANNEL_ID" ]]; then
+if [[ -n "$GUILD_ID" || -n "$CHANNEL_ID" ]]; then
   if [[ -z "$GUILD_ID" || -z "$CHANNEL_ID" ]]; then
     echo "Error: --guild and --channel must be provided together." >&2
     exit 1
   fi
-  CMD+=("play" "--guild-id" "$GUILD_ID" "--channel-id" "$CHANNEL_ID" "--mode" "$AUDIO_MODE")
+fi
+
+if [[ "$DIRECT" -eq 1 ]]; then
+  if [[ -n "$DM_USER_ID" ]]; then
+    CMD+=("dm-play" "--user-id" "$DM_USER_ID" "--mode" "$AUDIO_MODE")
+    if [[ "$RING" -eq 1 ]]; then
+      CMD+=("--ring")
+    fi
+  elif [[ -n "$GUILD_ID" ]]; then
+    CMD+=("play" "--guild-id" "$GUILD_ID" "--channel-id" "$CHANNEL_ID" "--mode" "$AUDIO_MODE")
+  else
+    case "${TARGET_MODE:-ctui}" in
+      ctui) CMD+=("ctui") ;;
+      tui) CMD+=("tui") ;;
+      list) CMD+=("list") ;;
+      *)
+        echo "Error: unsupported mode '$TARGET_MODE'" >&2
+        exit 1
+        ;;
+    esac
+  fi
 else
   case "${TARGET_MODE:-ctui}" in
-    ctui) CMD+=("ctui") ;;
-    tui) CMD+=("tui") ;;
-    list) CMD+=("list") ;;
+    ctui)
+      CMD+=("ctui")
+      if [[ -n "$DM_USER_ID" ]]; then
+        CMD+=("--start-dm-user-id" "$DM_USER_ID")
+      elif [[ -n "$GUILD_ID" ]]; then
+        CMD+=("--start-guild-id" "$GUILD_ID" "--start-channel-id" "$CHANNEL_ID")
+      fi
+      ;;
+    tui|list)
+      CMD+=("${TARGET_MODE}")
+      ;;
     *)
       echo "Error: unsupported mode '$TARGET_MODE'" >&2
       exit 1
