@@ -10,8 +10,12 @@ const CLIENT_CODECS = [{
     payload_type: 120
 }]
 
-VoiceEngine.setInputDevice('default')
-VoiceEngine.setOutputDevice('default')
+// Native device initialization can segfault in headless/minimal environments.
+// Opt in only when explicitly requested.
+if (process.env.VOICE_SET_DEVICES === '1') {
+    VoiceEngine.setInputDevice('default')
+    VoiceEngine.setOutputDevice('default')
+}
 
 const ws = new WebSocket('wss://gateway.discord.gg/?encoding=json&v=9')
 ws.on('message', onMessage)
