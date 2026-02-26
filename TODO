@@ -1,0 +1,3 @@
+Improve video/screensharing branch
+SIXEL preview of users currently in channel, ideally live-showing green circle around user avatar
+Handle that my ffmpeg doesn't have pipewire support
