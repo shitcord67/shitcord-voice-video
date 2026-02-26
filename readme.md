@@ -46,6 +46,11 @@ main menu has `Find User in Voice` for global searchable user-in-voice lookup wi
 `Ctrl+K` quick jump, mouse click selection (if terminal supports it), incoming call notifications, missed-call list, and connected-user talk/mic/spk panel.
 press `p` in voice-user/member lists for SIXEL user avatar preview.
 
+experimental video branch notes:
+`--exp-self-video` requests the self camera flag after voice connect.
+`--exp-self-stream` is currently a placeholder flag (no stream signaling implementation yet).
+while connected in ctui, use `Toggle self camera flag (exp)` to flip self camera flag live.
+
 # OLD (node prototype)
 status: receiving and sending audio works (tested on linux and macos)
 

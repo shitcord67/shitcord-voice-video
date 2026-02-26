@@ -444,6 +444,7 @@ class VoiceSelfClient(discord.Client):
                     [
                         "Restart / Apply audio mode",
                         "Audio settings",
+                        "Toggle self camera flag (exp)",
                         "Show DAVE status",
                         "Show debug log",
                         "Show missed calls",
@@ -478,17 +479,24 @@ class VoiceSelfClient(discord.Client):
                     self._ctui_audio_settings(stdscr)
                 elif choice == 2:
                     try:
+                        new_state = not bool(getattr(self.args, "exp_self_video", False))
+                        run(self._apply_self_video_flag(voice, new_state))
+                        self._curses_message(stdscr, f"Experimental self camera flag set to {new_state}.")
+                    except Exception as e:
+                        self._curses_message(stdscr, f"Error: {e}")
+                elif choice == 3:
+                    try:
                         run(self._wait_for_dave_status(voice, timeout=max(0.5, self.args.dave_wait_timeout)))
                         self._curses_message(stdscr, self._last_dave_status)
                     except Exception as e:
                         self._curses_message(stdscr, f"Error: {e}")
-                elif choice == 3:
-                    self._curses_show_debug_log(stdscr)
                 elif choice == 4:
-                    self._ctui_show_missed_calls(stdscr)
+                    self._curses_show_debug_log(stdscr)
                 elif choice == 5:
-                    self._ctui_show_call_log(stdscr)
+                    self._ctui_show_missed_calls(stdscr)
                 elif choice == 6:
+                    self._ctui_show_call_log(stdscr)
+                elif choice == 7:
                     try:
                         run(self._disconnect_voice(voice))
                     except Exception:
@@ -498,7 +506,7 @@ class VoiceSelfClient(discord.Client):
                     conn = self._ctui_quick_dm_call(stdscr, loop)
                     if conn is not None:
                         voice, label = conn
-                elif choice == 7:
+                elif choice == 8:
                     try:
                         run(self._disconnect_voice(voice))
                     except Exception:
@@ -508,7 +516,7 @@ class VoiceSelfClient(discord.Client):
                     conn = self._ctui_quick_jump(stdscr, loop)
                     if conn is not None:
                         voice, label = conn
-                elif choice in (8, 9):
+                elif choice in (9, 10):
                     try:
                         run(self._disconnect_voice(voice))
                     except Exception:
@@ -872,6 +880,9 @@ class VoiceSelfClient(discord.Client):
         ws = getattr(conn, "ws", None) if conn else None
         voice_ver = getattr(ws, "voice_version", None) if ws else None
         rtc_ver = getattr(ws, "rtc_worker_version", None) if ws else None
+        self_vs = getattr(conn, "self_voice_state", None) if conn else None
+        self_video = bool(getattr(self_vs, "self_video", False))
+        self_stream = bool(getattr(self_vs, "self_stream", False))
         return (
             "Status: "
             f"connected={voice.is_connected()} "
@@ -879,6 +890,8 @@ class VoiceSelfClient(discord.Client):
             f"mode={self.args.mode} "
             f"dave_protocol={dave_proto} "
             f"dave_encrypt={dave_encrypt} "
+            f"self_video={self_video} "
+            f"self_stream={self_stream} "
             f"voice_backend={voice_ver} "
             f"rtc_worker={rtc_ver}"
         )
@@ -1042,6 +1055,10 @@ class VoiceSelfClient(discord.Client):
             raise RuntimeError(f"Could not open DM channel with user {user_id}")
         print(f"Connecting to DM call with {user} (ring={self.args.ring})...")
         voice = await dm.connect(reconnect=True, ring=self.args.ring)
+        if getattr(self.args, "exp_self_video", False):
+            await self._apply_self_video_flag(voice, True)
+        if getattr(self.args, "exp_self_stream", False):
+            self._dbg("exp_self_stream requested but not implemented in library signaling path")
         self._attach_voice_ws_hook(voice)
         await self._after_connect_dave_checks(voice)
         self._remember_recent(
@@ -1089,6 +1106,10 @@ class VoiceSelfClient(discord.Client):
             raise RuntimeError(f"Voice channel not found: {channel_id}")
         print(f"Connecting to {guild.name}/{channel.name}...")
         voice = await channel.connect(reconnect=True, self_deaf=False, self_mute=False)
+        if getattr(self.args, "exp_self_video", False):
+            await self._apply_self_video_flag(voice, True)
+        if getattr(self.args, "exp_self_stream", False):
+            self._dbg("exp_self_stream requested but not implemented in library signaling path")
         self._attach_voice_ws_hook(voice)
         await self._after_connect_dave_checks(voice)
         self._remember_recent(
@@ -1317,6 +1338,29 @@ class VoiceSelfClient(discord.Client):
         if voice.is_playing():
             voice.stop()
         await voice.disconnect(force=True)
+
+    async def _apply_self_video_flag(self, voice: discord.VoiceClient, enabled: bool) -> None:
+        ws = getattr(self, "ws", None)
+        if ws is None:
+            raise RuntimeError("Gateway websocket is not available for self_video update.")
+        channel = getattr(voice, "channel", None)
+        channel_id = getattr(channel, "id", None)
+        if channel_id is None:
+            raise RuntimeError("Voice channel id not available.")
+        guild_id = getattr(getattr(channel, "guild", None), "id", None)
+        conn = getattr(voice, "_connection", None)
+        self_vs = getattr(conn, "self_voice_state", None) if conn else None
+        self_mute = bool(getattr(self_vs, "self_mute", False))
+        self_deaf = bool(getattr(self_vs, "self_deaf", False))
+        await ws.voice_state(
+            guild_id=guild_id,
+            channel_id=channel_id,
+            self_mute=self_mute,
+            self_deaf=self_deaf,
+            self_video=bool(enabled),
+        )
+        self.args.exp_self_video = bool(enabled)
+        self._dbg(f"exp self_video set to {enabled} on channel={channel_id}")
 
     async def _hold_connection(self, voice: discord.VoiceClient, label: str) -> None:
         print(f"Connected to {label}. Press Ctrl+C to disconnect.")
@@ -1782,6 +1826,8 @@ def parse_args() -> argparse.Namespace:
     play.add_argument("--dave-debug", action="store_true", help="Print DAVE negotiation status after connect")
     play.add_argument("--require-dave", action="store_true", help="Abort if DAVE is not active/encrypting")
     play.add_argument("--dave-wait-timeout", type=float, default=10.0, help="Seconds to wait for DAVE encryption readiness")
+    play.add_argument("--exp-self-video", action="store_true", help="Experimental: request self camera flag after connect")
+    play.add_argument("--exp-self-stream", action="store_true", help="Experimental placeholder for self stream flag")
 
     dm_play = sub.add_parser("dm-play", help="Start/join DM call and play audio")
     dm_play.add_argument("--user-id", type=int, required=False, help="Target user id for DM call")
@@ -1796,6 +1842,8 @@ def parse_args() -> argparse.Namespace:
     dm_play.add_argument("--dave-debug", action="store_true", help="Print DAVE negotiation status after connect")
     dm_play.add_argument("--require-dave", action="store_true", help="Abort if DAVE is not active/encrypting")
     dm_play.add_argument("--dave-wait-timeout", type=float, default=10.0, help="Seconds to wait for DAVE encryption readiness")
+    dm_play.add_argument("--exp-self-video", action="store_true", help="Experimental: request self camera flag after connect")
+    dm_play.add_argument("--exp-self-stream", action="store_true", help="Experimental placeholder for self stream flag")
 
     tui = sub.add_parser("tui", help="Interactive terminal UI for DM/Guild voice connect")
     tui.add_argument("--ring", action="store_true", help="Ring user when starting DM call")
@@ -1807,6 +1855,8 @@ def parse_args() -> argparse.Namespace:
     tui.add_argument("--dave-debug", action="store_true", help="Print DAVE negotiation status after connect")
     tui.add_argument("--require-dave", action="store_true", help="Abort if DAVE is not active/encrypting")
     tui.add_argument("--dave-wait-timeout", type=float, default=10.0, help="Seconds to wait for DAVE encryption readiness")
+    tui.add_argument("--exp-self-video", action="store_true", help="Experimental: request self camera flag after connect")
+    tui.add_argument("--exp-self-stream", action="store_true", help="Experimental placeholder for self stream flag")
 
     ctui = sub.add_parser("ctui", help="Curses full-screen TUI for DM/Guild connect and live control")
     ctui.add_argument("--ring", action="store_true", help="Ring user when starting DM call")
@@ -1819,6 +1869,8 @@ def parse_args() -> argparse.Namespace:
     ctui.add_argument("--dave-debug", action="store_true", help="Print DAVE negotiation status after connect")
     ctui.add_argument("--require-dave", action="store_true", help="Abort if DAVE is not active/encrypting")
     ctui.add_argument("--dave-wait-timeout", type=float, default=10.0, help="Seconds to wait for DAVE encryption readiness")
+    ctui.add_argument("--exp-self-video", action="store_true", help="Experimental: request self camera flag after connect")
+    ctui.add_argument("--exp-self-stream", action="store_true", help="Experimental placeholder for self stream flag")
     ctui.add_argument("--call-notify-seconds", type=float, default=15.0, help="Incoming-call notice duration in seconds")
     ctui.add_argument("--call-notify-persistent", action="store_true", help="Keep incoming-call notice visible until replaced")
     ctui.add_argument("--call-notify-sound", action="store_true", help="Play terminal bell on incoming call")
