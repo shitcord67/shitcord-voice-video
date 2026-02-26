@@ -29,6 +29,11 @@ sixel preview:
 - requires SIXEL-capable terminal + `chafa`
 - then press `p` in DM/Guild/user lists to preview avatars/icons
 
+microphone input format:
+- if ffmpeg reports `Unknown input format: 'pulse'`, use:
+`./start-selfbot.sh -- --mic-input-format pipewire`
+- available choices: `auto|pulse|pipewire|alsa`
+
 # python selfbot prototype (discord.py-self)
 this is a separate path from the node native module.
 
