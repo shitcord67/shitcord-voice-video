@@ -8,6 +8,14 @@ quick targets:
 `./start-selfbot.sh --list`
 (`--dm/--guild/--channel` now start CTUI and auto-connect. use `--direct` to skip CTUI.)
 
+launcher modes:
+- preferred CTUI: `./start-selfbot.sh`
+- CTUI + auto-connect DM: `./start-selfbot.sh --dm <user_id>`
+- CTUI + auto-connect guild voice: `./start-selfbot.sh --guild <guild_id> --channel <channel_id>`
+- simple line TUI: `./start-selfbot.sh --tui`
+- headless/direct (no CTUI): `./start-selfbot.sh --direct --dm <user_id> --mode connect`
+- list only: `./start-selfbot.sh --list`
+
 token handling:
 - reads token from `.voice-config.json` or `DISCORD_USER_TOKEN` by default
 - optional override: `./start-selfbot.sh --token <token>`
