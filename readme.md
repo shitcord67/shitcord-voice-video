@@ -49,7 +49,9 @@ press `p` in voice-user/member lists for SIXEL user avatar preview.
 experimental video branch notes:
 `--exp-self-video` requests the self camera flag after voice connect.
 `--exp-self-stream` is currently a placeholder flag (no stream signaling implementation yet).
+`--exp-video-opcode` sends the voice websocket VIDEO opcode after connect.
 while connected in ctui, use `Toggle self camera flag (exp)` to flip self camera flag live.
+while connected in ctui, use `Send VIDEO opcode (exp)` for explicit signaling tests.
 
 # OLD (node prototype)
 status: receiving and sending audio works (tested on linux and macos)

@@ -71,6 +71,21 @@ class VoiceSelfClient(discord.Client):
         self._finalize_call(call)
         self._dbg(f"call ended in channel {getattr(call.channel, 'id', '?')}")
 
+    async def on_voice_state_update(self, member, before, after) -> None:
+        try:
+            if bool(getattr(before, "self_video", False)) != bool(getattr(after, "self_video", False)):
+                self._dbg(
+                    f"voice_state video: user={member} ({member.id}) "
+                    f"{getattr(before, 'self_video', False)} -> {getattr(after, 'self_video', False)}"
+                )
+            if bool(getattr(before, "self_stream", False)) != bool(getattr(after, "self_stream", False)):
+                self._dbg(
+                    f"voice_state stream: user={member} ({member.id}) "
+                    f"{getattr(before, 'self_stream', False)} -> {getattr(after, 'self_stream', False)}"
+                )
+        except Exception as e:
+            self._dbg(f"on_voice_state_update hook error: {e!r}")
+
     def _is_ringing_me(self, call) -> bool:
         me = self.user
         if me is None:
@@ -445,6 +460,7 @@ class VoiceSelfClient(discord.Client):
                         "Restart / Apply audio mode",
                         "Audio settings",
                         "Toggle self camera flag (exp)",
+                        "Send VIDEO opcode (exp)",
                         "Show DAVE status",
                         "Show debug log",
                         "Show missed calls",
@@ -486,17 +502,23 @@ class VoiceSelfClient(discord.Client):
                         self._curses_message(stdscr, f"Error: {e}")
                 elif choice == 3:
                     try:
+                        run(self._exp_send_video_opcode(voice))
+                        self._curses_message(stdscr, "Sent VIDEO opcode.")
+                    except Exception as e:
+                        self._curses_message(stdscr, f"Error: {e}")
+                elif choice == 4:
+                    try:
                         run(self._wait_for_dave_status(voice, timeout=max(0.5, self.args.dave_wait_timeout)))
                         self._curses_message(stdscr, self._last_dave_status)
                     except Exception as e:
                         self._curses_message(stdscr, f"Error: {e}")
-                elif choice == 4:
-                    self._curses_show_debug_log(stdscr)
                 elif choice == 5:
-                    self._ctui_show_missed_calls(stdscr)
+                    self._curses_show_debug_log(stdscr)
                 elif choice == 6:
-                    self._ctui_show_call_log(stdscr)
+                    self._ctui_show_missed_calls(stdscr)
                 elif choice == 7:
+                    self._ctui_show_call_log(stdscr)
+                elif choice == 8:
                     try:
                         run(self._disconnect_voice(voice))
                     except Exception:
@@ -506,7 +528,7 @@ class VoiceSelfClient(discord.Client):
                     conn = self._ctui_quick_dm_call(stdscr, loop)
                     if conn is not None:
                         voice, label = conn
-                elif choice == 8:
+                elif choice == 9:
                     try:
                         run(self._disconnect_voice(voice))
                     except Exception:
@@ -516,7 +538,7 @@ class VoiceSelfClient(discord.Client):
                     conn = self._ctui_quick_jump(stdscr, loop)
                     if conn is not None:
                         voice, label = conn
-                elif choice in (9, 10):
+                elif choice in (10, 11):
                     try:
                         run(self._disconnect_voice(voice))
                     except Exception:
@@ -1057,6 +1079,8 @@ class VoiceSelfClient(discord.Client):
         voice = await dm.connect(reconnect=True, ring=self.args.ring)
         if getattr(self.args, "exp_self_video", False):
             await self._apply_self_video_flag(voice, True)
+        if getattr(self.args, "exp_video_opcode", False):
+            await self._exp_send_video_opcode(voice)
         if getattr(self.args, "exp_self_stream", False):
             self._dbg("exp_self_stream requested but not implemented in library signaling path")
         self._attach_voice_ws_hook(voice)
@@ -1108,6 +1132,8 @@ class VoiceSelfClient(discord.Client):
         voice = await channel.connect(reconnect=True, self_deaf=False, self_mute=False)
         if getattr(self.args, "exp_self_video", False):
             await self._apply_self_video_flag(voice, True)
+        if getattr(self.args, "exp_video_opcode", False):
+            await self._exp_send_video_opcode(voice)
         if getattr(self.args, "exp_self_stream", False):
             self._dbg("exp_self_stream requested but not implemented in library signaling path")
         self._attach_voice_ws_hook(voice)
@@ -1361,6 +1387,13 @@ class VoiceSelfClient(discord.Client):
         )
         self.args.exp_self_video = bool(enabled)
         self._dbg(f"exp self_video set to {enabled} on channel={channel_id}")
+
+    async def _exp_send_video_opcode(self, voice: discord.VoiceClient) -> None:
+        ws = getattr(voice, "ws", None)
+        if ws is None:
+            raise RuntimeError("Voice websocket unavailable for VIDEO opcode.")
+        await ws.client_connect()
+        self._dbg("exp VIDEO opcode sent via voice websocket")
 
     async def _hold_connection(self, voice: discord.VoiceClient, label: str) -> None:
         print(f"Connected to {label}. Press Ctrl+C to disconnect.")
@@ -1828,6 +1861,7 @@ def parse_args() -> argparse.Namespace:
     play.add_argument("--dave-wait-timeout", type=float, default=10.0, help="Seconds to wait for DAVE encryption readiness")
     play.add_argument("--exp-self-video", action="store_true", help="Experimental: request self camera flag after connect")
     play.add_argument("--exp-self-stream", action="store_true", help="Experimental placeholder for self stream flag")
+    play.add_argument("--exp-video-opcode", action="store_true", help="Experimental: send VOICE VIDEO opcode after connect")
 
     dm_play = sub.add_parser("dm-play", help="Start/join DM call and play audio")
     dm_play.add_argument("--user-id", type=int, required=False, help="Target user id for DM call")
@@ -1844,6 +1878,7 @@ def parse_args() -> argparse.Namespace:
     dm_play.add_argument("--dave-wait-timeout", type=float, default=10.0, help="Seconds to wait for DAVE encryption readiness")
     dm_play.add_argument("--exp-self-video", action="store_true", help="Experimental: request self camera flag after connect")
     dm_play.add_argument("--exp-self-stream", action="store_true", help="Experimental placeholder for self stream flag")
+    dm_play.add_argument("--exp-video-opcode", action="store_true", help="Experimental: send VOICE VIDEO opcode after connect")
 
     tui = sub.add_parser("tui", help="Interactive terminal UI for DM/Guild voice connect")
     tui.add_argument("--ring", action="store_true", help="Ring user when starting DM call")
@@ -1857,6 +1892,7 @@ def parse_args() -> argparse.Namespace:
     tui.add_argument("--dave-wait-timeout", type=float, default=10.0, help="Seconds to wait for DAVE encryption readiness")
     tui.add_argument("--exp-self-video", action="store_true", help="Experimental: request self camera flag after connect")
     tui.add_argument("--exp-self-stream", action="store_true", help="Experimental placeholder for self stream flag")
+    tui.add_argument("--exp-video-opcode", action="store_true", help="Experimental: send VOICE VIDEO opcode after connect")
 
     ctui = sub.add_parser("ctui", help="Curses full-screen TUI for DM/Guild connect and live control")
     ctui.add_argument("--ring", action="store_true", help="Ring user when starting DM call")
@@ -1871,6 +1907,7 @@ def parse_args() -> argparse.Namespace:
     ctui.add_argument("--dave-wait-timeout", type=float, default=10.0, help="Seconds to wait for DAVE encryption readiness")
     ctui.add_argument("--exp-self-video", action="store_true", help="Experimental: request self camera flag after connect")
     ctui.add_argument("--exp-self-stream", action="store_true", help="Experimental placeholder for self stream flag")
+    ctui.add_argument("--exp-video-opcode", action="store_true", help="Experimental: send VOICE VIDEO opcode after connect")
     ctui.add_argument("--call-notify-seconds", type=float, default=15.0, help="Incoming-call notice duration in seconds")
     ctui.add_argument("--call-notify-persistent", action="store_true", help="Keep incoming-call notice visible until replaced")
     ctui.add_argument("--call-notify-sound", action="store_true", help="Play terminal bell on incoming call")
