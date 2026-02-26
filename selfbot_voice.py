@@ -332,7 +332,11 @@ class VoiceSelfClient(discord.Client):
                             continue
                         dm_channels = sorted(dm_channels, key=lambda c: str(c.recipient).lower() if c.recipient else "")
                         labels = [
-                            (f"{ch.recipient} ({ch.recipient.id})" if ch.recipient else f"unknown ({ch.id})")
+                            (
+                                f"{ch.recipient} ({ch.recipient.id}) [{self._dm_call_status(ch)}]"
+                                if ch.recipient
+                                else f"unknown ({ch.id}) [{self._dm_call_status(ch)}]"
+                            )
                             for ch in dm_channels
                         ]
                         pick = self._curses_menu(
@@ -572,6 +576,11 @@ class VoiceSelfClient(discord.Client):
             if notice:
                 self._safe_addstr(stdscr, 1, 0, f"NOTIFY: {notice}")
                 header_start = 2
+            if title == "Main":
+                dm_lines = self._dm_voice_front_lines(limit=4)
+                for i, line in enumerate(dm_lines):
+                    self._safe_addstr(stdscr, header_start + i, 0, line)
+                header_start += len(dm_lines)
             if title.startswith("Connected:"):
                 status = self._collect_voice_status(voice)
                 self._curses_add_wrapped(stdscr, header_start + 0, 0, status)
@@ -906,6 +915,53 @@ class VoiceSelfClient(discord.Client):
         if ts is None:
             return False
         return (time.monotonic() - ts) <= 1.8
+
+    def _dm_call_status(self, dm: discord.DMChannel) -> str:
+        call = getattr(dm, "call", None)
+        if call is None:
+            return "idle"
+        if bool(getattr(call, "unavailable", False)):
+            return "unavailable"
+        recipient = getattr(dm, "recipient", None)
+        me = self.user
+        try:
+            voice_states = getattr(call, "voice_states", {}) or {}
+        except Exception:
+            voice_states = {}
+        recipient_in = bool(recipient and int(recipient.id) in voice_states)
+        me_in = bool(me and int(me.id) in voice_states) or bool(getattr(call, "connected", False))
+        ringing = list(getattr(call, "ringing", []) or [])
+        me_ringing = bool(me and any(int(u.id) == int(me.id) for u in ringing))
+        rec_ringing = bool(recipient and any(int(u.id) == int(recipient.id) for u in ringing))
+        if recipient_in and me_in:
+            return "both-in-call"
+        if recipient_in:
+            return "friend-in-call"
+        if me_in:
+            return "you-in-call"
+        if me_ringing:
+            return "incoming-ring"
+        if rec_ringing:
+            return "outgoing-ring"
+        if voice_states:
+            return "call-active"
+        return "call-open"
+
+    def _dm_voice_front_lines(self, limit: int = 4) -> list[str]:
+        dms = [ch for ch in self.private_channels if isinstance(ch, discord.DMChannel)]
+        active: list[tuple[str, str]] = []
+        for dm in dms:
+            status = self._dm_call_status(dm)
+            if status not in ("idle", "unavailable"):
+                who = str(dm.recipient) if dm.recipient else f"dm:{dm.id}"
+                active.append((who, status))
+        active.sort(key=lambda x: x[0].lower())
+        if not active:
+            return ["DM voice: no active DM calls"]
+        out = [f"DM voice active: {len(active)}"]
+        for who, status in active[: max(0, limit - 1)]:
+            out.append(f"  {who}: {status}")
+        return out
 
     def _dbg(self, msg: str) -> None:
         ts = datetime.now().strftime("%H:%M:%S")
