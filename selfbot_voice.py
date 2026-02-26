@@ -56,6 +56,7 @@ class VoiceSelfClient(discord.Client):
         self._video_seq: Optional[int] = None
         self._video_ts: Optional[int] = None
         self._video_ssrc: Optional[int] = None
+        self._ffmpeg_demuxers_cache: dict[str, set[str]] = {}
 
     async def on_ready(self):
         try:
@@ -891,8 +892,28 @@ class VoiceSelfClient(discord.Client):
             return
         tmp_path = None
         try:
-            with urllib.request.urlopen(url, timeout=10) as resp:
-                data = resp.read()
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": "Mozilla/5.0",
+                    "Accept": "image/*,*/*;q=0.8",
+                },
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=10) as resp:
+                    data = resp.read()
+            except Exception:
+                retry_url = url.replace(".webp", ".png") if ".webp" in url else url
+                req2 = urllib.request.Request(
+                    retry_url,
+                    headers={
+                        "User-Agent": "Mozilla/5.0",
+                        "Accept": "image/*,*/*;q=0.8",
+                        "Referer": "https://discord.com/",
+                    },
+                )
+                with urllib.request.urlopen(req2, timeout=10) as resp:
+                    data = resp.read()
             with tempfile.NamedTemporaryFile(delete=False, suffix=".img") as tmp:
                 tmp.write(data)
                 tmp_path = tmp.name
@@ -1932,6 +1953,45 @@ class VoiceSelfClient(discord.Client):
                 f"DAVE required but not active (active_protocol={active_proto}, can_encrypt={can_encrypt})"
             )
 
+    def _ffmpeg_demuxers(self, ffmpeg: str) -> set[str]:
+        cached = self._ffmpeg_demuxers_cache.get(ffmpeg)
+        if cached is not None:
+            return cached
+        demuxers: set[str] = set()
+        try:
+            proc = subprocess.run([ffmpeg, "-hide_banner", "-demuxers"], capture_output=True, text=True, check=False)
+            out = f"{proc.stdout}\n{proc.stderr}"
+            for line in out.splitlines():
+                parts = line.split()
+                if len(parts) >= 2 and parts[0].startswith("D"):
+                    demuxers.add(parts[1])
+        except Exception:
+            self._ffmpeg_demuxers_cache[ffmpeg] = demuxers
+            return demuxers
+        self._ffmpeg_demuxers_cache[ffmpeg] = demuxers
+        return demuxers
+
+    def _resolve_mic_input_format(self, ffmpeg: str) -> str:
+        req = (getattr(self.args, "mic_input_format", "auto") or "auto").strip().lower()
+        allowed = {"auto", "pulse", "pipewire", "alsa"}
+        if req not in allowed:
+            raise RuntimeError(f"Invalid --mic-input-format '{req}'. Choose one of: auto,pulse,pipewire,alsa")
+        demuxers = self._ffmpeg_demuxers(ffmpeg)
+        if req != "auto":
+            if req not in demuxers:
+                raise RuntimeError(
+                    f"ffmpeg does not support '{req}' input format on this system. "
+                    f"Available demuxers include: {', '.join(sorted(demuxers)) or '(unknown)'}"
+                )
+            return req
+        for candidate in ("pulse", "pipewire", "alsa"):
+            if candidate in demuxers:
+                return candidate
+        raise RuntimeError(
+            "ffmpeg has no supported mic input demuxer (pulse/pipewire/alsa). "
+            "Install an ffmpeg build with PulseAudio or PipeWire support."
+        )
+
     def _make_audio_source(self, ffmpeg: str) -> discord.AudioSource:
         if self.args.mode == "file":
             if not os.path.exists(self.args.file):
@@ -1944,10 +2004,16 @@ class VoiceSelfClient(discord.Client):
             )
         if self.args.mode == "mic":
             source_name = self.args.pulse_source or "default"
+            fmt = self._resolve_mic_input_format(ffmpeg)
+            if fmt == "alsa" and source_name.startswith("alsa_input."):
+                raise RuntimeError(
+                    "Selected source looks like a PulseAudio/PipeWire source name, but ffmpeg is using ALSA input. "
+                    "Set --mic-input-format pulse (with ffmpeg pulse support) or pass an ALSA device (e.g. hw:1,0)."
+                )
             return discord.FFmpegPCMAudio(
                 source=source_name,
                 executable=ffmpeg,
-                before_options="-f pulse -thread_queue_size 1024",
+                before_options=f"-f {fmt} -thread_queue_size 1024",
                 options="-vn",
             )
 
@@ -2013,7 +2079,7 @@ async def _run(args: argparse.Namespace) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="discord.py-self voice helper")
+    parser = argparse.ArgumentParser(description="shitcord-voice+video")
     parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, help=f"Path to local config json (default: {DEFAULT_CONFIG_PATH})")
     parser.add_argument("--token", help="Discord user token (or set DISCORD_USER_TOKEN)")
     parser.add_argument("--log-file", default=None, help="Append debug/errors to this file")
@@ -2052,6 +2118,7 @@ def parse_args() -> argparse.Namespace:
     dm_play.add_argument("--noise-amp", type=float, default=0.08, help="Noise amplitude (0.0-1.0)")
     dm_play.add_argument("--ffmpeg-path", default=None, help="Path to ffmpeg binary")
     dm_play.add_argument("--pulse-source", default=None, help="PulseAudio source name (used with --mode mic)")
+    dm_play.add_argument("--mic-input-format", choices=["auto", "pulse", "pipewire", "alsa"], default="auto", help="ffmpeg input format for microphone mode")
     dm_play.add_argument("--pulse-sink", default=None, help="PulseAudio sink name to set as default")
     dm_play.add_argument("--dave-debug", action="store_true", help="Print DAVE negotiation status after connect")
     dm_play.add_argument("--require-dave", action="store_true", help="Abort if DAVE is not active/encrypting")
@@ -2069,6 +2136,7 @@ def parse_args() -> argparse.Namespace:
     tui.add_argument("--file", default="rickroll.ogg", help="Default file path in TUI file mode")
     tui.add_argument("--noise-amp", type=float, default=0.08, help="Default noise amplitude in TUI noise mode")
     tui.add_argument("--pulse-source", default=None, help="Default PulseAudio source for TUI microphone mode")
+    tui.add_argument("--mic-input-format", choices=["auto", "pulse", "pipewire", "alsa"], default="auto", help="ffmpeg input format for microphone mode")
     tui.add_argument("--pulse-sink", default=None, help="Default PulseAudio sink")
     tui.add_argument("--ffmpeg-path", default=None, help="Path to ffmpeg binary")
     tui.add_argument("--dave-debug", action="store_true", help="Print DAVE negotiation status after connect")
@@ -2087,6 +2155,7 @@ def parse_args() -> argparse.Namespace:
     ctui.add_argument("--file", default="rickroll.ogg", help="Default file path in Curses TUI")
     ctui.add_argument("--noise-amp", type=float, default=0.08, help="Default noise amplitude")
     ctui.add_argument("--pulse-source", default=None, help="Default PulseAudio source")
+    ctui.add_argument("--mic-input-format", choices=["auto", "pulse", "pipewire", "alsa"], default="auto", help="ffmpeg input format for microphone mode")
     ctui.add_argument("--pulse-sink", default=None, help="Default PulseAudio sink")
     ctui.add_argument("--ffmpeg-path", default=None, help="Path to ffmpeg binary")
     ctui.add_argument("--sixel", action="store_true", help="Enable SIXEL avatar/icon previews with chafa")

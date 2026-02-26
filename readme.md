@@ -1,4 +1,4 @@
-# python selfbot prototype (discord.py-self)
+# shitcord-voice+video
 this is a separate path from the node native module.
 
 local config file (already git-ignored):
@@ -37,6 +37,9 @@ once connected in TUI, use `session>` commands without restarting:
 
 curses full-screen TUI:
 `python selfbot_voice.py ctui --dave-debug --dave-wait-timeout 20`
+
+pipewire mic hint (if ffmpeg doesn't auto-detect correctly):
+`python selfbot_voice.py ctui --mic-input-format pipewire`
 
 ctui features:
 type to search in lists (fuzzy in-order; prefix matches ranked first), press `p` in DM/Guild lists for SIXEL preview (run with `--sixel`, requires `chafa`).
