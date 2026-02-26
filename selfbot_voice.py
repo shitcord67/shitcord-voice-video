@@ -385,7 +385,8 @@ class VoiceSelfClient(discord.Client):
                 status = self._collect_voice_status(voice)
                 self._curses_add_wrapped(stdscr, 1, 0, status)
                 self._curses_add_wrapped(stdscr, 2, 0, self._last_dave_status)
-                base = 5
+                self._curses_add_wrapped(stdscr, 3, 0, self._collect_audio_status())
+                base = 6
             else:
                 base = 3
             self._safe_addstr(stdscr, base - 1, 0, f"Search: {query}")
@@ -611,6 +612,32 @@ class VoiceSelfClient(discord.Client):
             f"dave_encrypt={dave_encrypt} "
             f"voice_backend={voice_ver} "
             f"rtc_worker={rtc_ver}"
+        )
+
+    def _collect_audio_status(self) -> str:
+        mode = getattr(self.args, "mode", "connect")
+        if mode == "file":
+            return (
+                "Audio: "
+                f"mode=file file={getattr(self.args, 'file', '')} "
+                f"loop={getattr(self.args, 'loop', False)} "
+                f"sink={getattr(self.args, 'pulse_sink', None) or 'current'}"
+            )
+        if mode == "noise":
+            return (
+                "Audio: "
+                f"mode=noise amp={getattr(self.args, 'noise_amp', 0.08)} "
+                f"sink={getattr(self.args, 'pulse_sink', None) or 'current'}"
+            )
+        if mode == "mic":
+            return (
+                "Audio: "
+                f"mode=mic source={getattr(self.args, 'pulse_source', None) or 'default'} "
+                f"sink={getattr(self.args, 'pulse_sink', None) or 'current'}"
+            )
+        return (
+            "Audio: "
+            f"mode=connect sink={getattr(self.args, 'pulse_sink', None) or 'current'}"
         )
 
     def _dbg(self, msg: str) -> None:
