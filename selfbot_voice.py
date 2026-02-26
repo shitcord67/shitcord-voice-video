@@ -49,6 +49,7 @@ class VoiceSelfClient(discord.Client):
             "video_opcode_sent_calls": 0,
         }
         self._video_probe_events: list[str] = []
+        self._video_loop_task: Optional[asyncio.Task] = None
 
     async def on_ready(self):
         try:
@@ -488,6 +489,7 @@ class VoiceSelfClient(discord.Client):
                         "Audio settings",
                         "Toggle self camera flag (exp)",
                         "Send VIDEO opcode (exp)",
+                        "Toggle VIDEO opcode loop (exp)",
                         "Show video probe status (exp)",
                         "Show DAVE status",
                         "Show debug log",
@@ -535,20 +537,26 @@ class VoiceSelfClient(discord.Client):
                     except Exception as e:
                         self._curses_message(stdscr, f"Error: {e}")
                 elif choice == 4:
-                    self._ctui_show_video_probe(stdscr)
+                    try:
+                        enabled = run(self._toggle_video_opcode_loop(voice))
+                        self._curses_message(stdscr, f"VIDEO opcode loop is now {'ON' if enabled else 'OFF'}.")
+                    except Exception as e:
+                        self._curses_message(stdscr, f"Error: {e}")
                 elif choice == 5:
+                    self._ctui_show_video_probe(stdscr)
+                elif choice == 6:
                     try:
                         run(self._wait_for_dave_status(voice, timeout=max(0.5, self.args.dave_wait_timeout)))
                         self._curses_message(stdscr, self._last_dave_status)
                     except Exception as e:
                         self._curses_message(stdscr, f"Error: {e}")
-                elif choice == 6:
-                    self._curses_show_debug_log(stdscr)
                 elif choice == 7:
-                    self._ctui_show_missed_calls(stdscr)
+                    self._curses_show_debug_log(stdscr)
                 elif choice == 8:
-                    self._ctui_show_call_log(stdscr)
+                    self._ctui_show_missed_calls(stdscr)
                 elif choice == 9:
+                    self._ctui_show_call_log(stdscr)
+                elif choice == 10:
                     try:
                         run(self._disconnect_voice(voice))
                     except Exception:
@@ -558,7 +566,7 @@ class VoiceSelfClient(discord.Client):
                     conn = self._ctui_quick_dm_call(stdscr, loop)
                     if conn is not None:
                         voice, label = conn
-                elif choice == 10:
+                elif choice == 11:
                     try:
                         run(self._disconnect_voice(voice))
                     except Exception:
@@ -568,7 +576,7 @@ class VoiceSelfClient(discord.Client):
                     conn = self._ctui_quick_jump(stdscr, loop)
                     if conn is not None:
                         voice, label = conn
-                elif choice in (11, 12):
+                elif choice in (12, 13):
                     try:
                         run(self._disconnect_voice(voice))
                     except Exception:
@@ -1422,6 +1430,9 @@ class VoiceSelfClient(discord.Client):
             self._enforce_dave_or_raise(voice)
 
     async def _disconnect_voice(self, voice: discord.VoiceClient) -> None:
+        if self._video_loop_task is not None:
+            self._video_loop_task.cancel()
+            self._video_loop_task = None
         if voice.is_playing():
             voice.stop()
         await voice.disconnect(force=True)
@@ -1459,6 +1470,27 @@ class VoiceSelfClient(discord.Client):
         self._video_probe_counts["video_opcode_sent_calls"] += 1
         self._dbg("exp VIDEO opcode sent via voice websocket")
         self._video_probe_event("sent VOICE VIDEO opcode")
+
+    async def _toggle_video_opcode_loop(self, voice: discord.VoiceClient) -> bool:
+        if self._video_loop_task is not None:
+            self._video_loop_task.cancel()
+            self._video_loop_task = None
+            self._video_probe_event("stopped VIDEO opcode loop")
+            return False
+
+        interval = max(0.5, float(getattr(self.args, "exp_video_loop_interval", 2.0)))
+
+        async def _loop():
+            try:
+                while True:
+                    await self._exp_send_video_opcode(voice)
+                    await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                pass
+
+        self._video_loop_task = asyncio.create_task(_loop())
+        self._video_probe_event(f"started VIDEO opcode loop interval={interval}s")
+        return True
 
     async def _hold_connection(self, voice: discord.VoiceClient, label: str) -> None:
         print(f"Connected to {label}. Press Ctrl+C to disconnect.")
@@ -1927,6 +1959,7 @@ def parse_args() -> argparse.Namespace:
     play.add_argument("--exp-self-video", action="store_true", help="Experimental: request self camera flag after connect")
     play.add_argument("--exp-self-stream", action="store_true", help="Experimental placeholder for self stream flag")
     play.add_argument("--exp-video-opcode", action="store_true", help="Experimental: send VOICE VIDEO opcode after connect")
+    play.add_argument("--exp-video-loop-interval", type=float, default=2.0, help="Seconds between VIDEO opcode loop sends")
 
     dm_play = sub.add_parser("dm-play", help="Start/join DM call and play audio")
     dm_play.add_argument("--user-id", type=int, required=False, help="Target user id for DM call")
@@ -1944,6 +1977,7 @@ def parse_args() -> argparse.Namespace:
     dm_play.add_argument("--exp-self-video", action="store_true", help="Experimental: request self camera flag after connect")
     dm_play.add_argument("--exp-self-stream", action="store_true", help="Experimental placeholder for self stream flag")
     dm_play.add_argument("--exp-video-opcode", action="store_true", help="Experimental: send VOICE VIDEO opcode after connect")
+    dm_play.add_argument("--exp-video-loop-interval", type=float, default=2.0, help="Seconds between VIDEO opcode loop sends")
 
     tui = sub.add_parser("tui", help="Interactive terminal UI for DM/Guild voice connect")
     tui.add_argument("--ring", action="store_true", help="Ring user when starting DM call")
@@ -1958,6 +1992,7 @@ def parse_args() -> argparse.Namespace:
     tui.add_argument("--exp-self-video", action="store_true", help="Experimental: request self camera flag after connect")
     tui.add_argument("--exp-self-stream", action="store_true", help="Experimental placeholder for self stream flag")
     tui.add_argument("--exp-video-opcode", action="store_true", help="Experimental: send VOICE VIDEO opcode after connect")
+    tui.add_argument("--exp-video-loop-interval", type=float, default=2.0, help="Seconds between VIDEO opcode loop sends")
 
     ctui = sub.add_parser("ctui", help="Curses full-screen TUI for DM/Guild connect and live control")
     ctui.add_argument("--ring", action="store_true", help="Ring user when starting DM call")
@@ -1973,6 +2008,7 @@ def parse_args() -> argparse.Namespace:
     ctui.add_argument("--exp-self-video", action="store_true", help="Experimental: request self camera flag after connect")
     ctui.add_argument("--exp-self-stream", action="store_true", help="Experimental placeholder for self stream flag")
     ctui.add_argument("--exp-video-opcode", action="store_true", help="Experimental: send VOICE VIDEO opcode after connect")
+    ctui.add_argument("--exp-video-loop-interval", type=float, default=2.0, help="Seconds between VIDEO opcode loop sends")
     ctui.add_argument("--call-notify-seconds", type=float, default=15.0, help="Incoming-call notice duration in seconds")
     ctui.add_argument("--call-notify-persistent", action="store_true", help="Keep incoming-call notice visible until replaced")
     ctui.add_argument("--call-notify-sound", action="store_true", help="Play terminal bell on incoming call")
