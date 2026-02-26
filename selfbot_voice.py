@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import asyncio
+import curses
 import json
 import os
 import shutil
@@ -36,6 +37,8 @@ class VoiceSelfClient(discord.Client):
                 await self._play_dm_audio()
             elif self.args.command == "tui":
                 await self._run_tui()
+            elif self.args.command == "ctui":
+                await self._run_ctui()
             else:
                 print(f"Unknown command: {self.args.command}")
         finally:
@@ -122,7 +125,227 @@ class VoiceSelfClient(discord.Client):
                 else:
                     await self._connect_guild_from_list()
 
+    async def _run_ctui(self) -> None:
+        loop = asyncio.get_running_loop()
+        await asyncio.to_thread(self._ctui_thread_main, loop)
+
+    def _ctui_thread_main(self, loop: asyncio.AbstractEventLoop) -> None:
+        curses.wrapper(self._ctui_main, loop)
+
+    def _ctui_main(self, stdscr, loop: asyncio.AbstractEventLoop) -> None:
+        curses.curs_set(0)
+        stdscr.keypad(True)
+        voice = None
+        label = ""
+
+        def run(coro):
+            return asyncio.run_coroutine_threadsafe(coro, loop).result()
+
+        while True:
+            stdscr.clear()
+            stdscr.addstr(0, 0, f"discord.py-self ctui  user={self.user} ({self.user.id})")
+            if voice is None:
+                choice = self._curses_menu(stdscr, "Main", ["Connect DM", "Connect Guild", "Audio Settings", "Quit"])
+                if choice == 0:
+                    target = self._curses_menu(stdscr, "DM", ["Input ID", "List", f"Toggle Ring ({'ON' if self.args.ring else 'OFF'})", "Back"])
+                    if target == 0:
+                        raw = self._curses_prompt(stdscr, "User ID")
+                        if raw.isdigit():
+                            try:
+                                voice, label = run(self._open_dm_connection_by_id(int(raw)))
+                            except Exception as e:
+                                self._curses_message(stdscr, f"Error: {e}")
+                    elif target == 1:
+                        dm_channels = [ch for ch in self.private_channels if isinstance(ch, discord.DMChannel)]
+                        if not dm_channels:
+                            self._curses_message(stdscr, "No DM channels found.")
+                            continue
+                        dm_channels = sorted(dm_channels, key=lambda c: str(c.recipient).lower() if c.recipient else "")
+                        labels = [
+                            (f"{ch.recipient} ({ch.recipient.id})" if ch.recipient else f"unknown ({ch.id})")
+                            for ch in dm_channels
+                        ]
+                        pick = self._curses_menu(stdscr, "Select DM", labels + ["Back"])
+                        if pick < len(dm_channels):
+                            chosen = dm_channels[pick]
+                            uid = chosen.recipient.id if chosen.recipient else None
+                            if uid is None:
+                                self._curses_message(stdscr, "DM has no recipient id.")
+                            else:
+                                try:
+                                    voice, label = run(self._open_dm_connection_by_id(uid))
+                                except Exception as e:
+                                    self._curses_message(stdscr, f"Error: {e}")
+                    elif target == 2:
+                        self.args.ring = not self.args.ring
+                elif choice == 1:
+                    target = self._curses_menu(stdscr, "Guild", ["Input IDs", "List", "Back"])
+                    if target == 0:
+                        g = self._curses_prompt(stdscr, "Guild ID")
+                        c = self._curses_prompt(stdscr, "Channel ID")
+                        if g.isdigit() and c.isdigit():
+                            try:
+                                voice, label = run(self._open_guild_connection(int(g), int(c)))
+                            except Exception as e:
+                                self._curses_message(stdscr, f"Error: {e}")
+                    elif target == 1:
+                        guilds = sorted(self.guilds, key=lambda gg: gg.name.lower())
+                        if not guilds:
+                            self._curses_message(stdscr, "No guilds found.")
+                            continue
+                        gpick = self._curses_menu(stdscr, "Select Guild", [f"{g.name} ({g.id})" for g in guilds] + ["Back"])
+                        if gpick < len(guilds):
+                            guild = guilds[gpick]
+                            chans = sorted(guild.voice_channels, key=lambda cc: cc.position)
+                            if not chans:
+                                self._curses_message(stdscr, "Selected guild has no voice channels.")
+                                continue
+                            cpick = self._curses_menu(
+                                stdscr,
+                                "Select Voice Channel",
+                                [f"{ch.name} ({ch.id}) members={len(ch.members)}" for ch in chans] + ["Back"],
+                            )
+                            if cpick < len(chans):
+                                ch = chans[cpick]
+                                try:
+                                    voice, label = run(self._open_guild_connection(guild.id, ch.id))
+                                except Exception as e:
+                                    self._curses_message(stdscr, f"Error: {e}")
+                elif choice == 2:
+                    self._ctui_audio_settings(stdscr)
+                else:
+                    return
+            else:
+                choice = self._curses_menu(
+                    stdscr,
+                    f"Connected: {label}",
+                    [
+                        "Restart / Apply audio mode",
+                        "Audio settings",
+                        "Show DAVE status",
+                        "Switch target (disconnect)",
+                        "Disconnect",
+                        "Quit",
+                    ],
+                )
+                if choice == 0:
+                    try:
+                        run(self._restart_playback(voice, label))
+                        self._curses_message(stdscr, "Playback restarted/applied.")
+                    except Exception as e:
+                        self._curses_message(stdscr, f"Error: {e}")
+                elif choice == 1:
+                    self._ctui_audio_settings(stdscr)
+                elif choice == 2:
+                    try:
+                        run(self._wait_for_dave_status(voice, timeout=max(0.5, self.args.dave_wait_timeout)))
+                        self._curses_message(stdscr, "DAVE status printed to terminal output.")
+                    except Exception as e:
+                        self._curses_message(stdscr, f"Error: {e}")
+                elif choice in (3, 4):
+                    try:
+                        run(self._disconnect_voice(voice))
+                    except Exception:
+                        pass
+                    voice = None
+                    label = ""
+                else:
+                    try:
+                        run(self._disconnect_voice(voice))
+                    except Exception:
+                        pass
+                    return
+
+    def _ctui_audio_settings(self, stdscr) -> None:
+        mode = self._curses_menu(stdscr, "Audio mode", ["File", "Noise", "Microphone", "Connect only", "Back"])
+        if mode == 0:
+            self.args.mode = "file"
+            raw = self._curses_prompt(stdscr, f"File path [{self.args.file}]")
+            if raw:
+                self.args.file = raw
+            self.args.loop = self._curses_menu(stdscr, "Loop file playback?", ["Yes", "No"]) == 0
+        elif mode == 1:
+            self.args.mode = "noise"
+            raw = self._curses_prompt(stdscr, f"Noise amplitude [{self.args.noise_amp}]")
+            if raw:
+                try:
+                    self.args.noise_amp = float(raw)
+                except ValueError:
+                    pass
+            self.args.loop = False
+        elif mode == 2:
+            self.args.mode = "mic"
+            sources = self._pulse_devices("sources")
+            if sources:
+                idx = self._curses_menu(stdscr, "Select Pulse source", sources + ["Manual", "Back"])
+                if idx < len(sources):
+                    self.args.pulse_source = sources[idx]
+                elif idx == len(sources):
+                    manual = self._curses_prompt(stdscr, "Pulse source name")
+                    if manual:
+                        self.args.pulse_source = manual
+            else:
+                manual = self._curses_prompt(stdscr, "Pulse source name")
+                if manual:
+                    self.args.pulse_source = manual
+            self.args.loop = False
+        elif mode == 3:
+            self.args.mode = "connect"
+            self.args.loop = False
+
+        sinks = self._pulse_devices("sinks")
+        if sinks:
+            idx = self._curses_menu(stdscr, "Output sink", ["Keep current"] + sinks + ["Manual"])
+            if idx >= 1 and idx <= len(sinks):
+                self.args.pulse_sink = sinks[idx - 1]
+                self._set_default_pulse_device("sink", self.args.pulse_sink)
+            elif idx == len(sinks) + 1:
+                manual = self._curses_prompt(stdscr, "Pulse sink name")
+                if manual:
+                    self.args.pulse_sink = manual
+                    self._set_default_pulse_device("sink", self.args.pulse_sink)
+
+        if self.args.mode == "mic" and self.args.pulse_source:
+            self._set_default_pulse_device("source", self.args.pulse_source)
+
+    def _curses_menu(self, stdscr, title: str, items: list[str]) -> int:
+        idx = 0
+        while True:
+            stdscr.clear()
+            stdscr.addstr(0, 0, title)
+            for i, item in enumerate(items):
+                prefix = "> " if i == idx else "  "
+                stdscr.addstr(2 + i, 0, f"{prefix}{item}")
+            stdscr.refresh()
+            ch = stdscr.getch()
+            if ch in (curses.KEY_UP, ord("k")):
+                idx = (idx - 1) % len(items)
+            elif ch in (curses.KEY_DOWN, ord("j")):
+                idx = (idx + 1) % len(items)
+            elif ch in (10, 13, curses.KEY_ENTER):
+                return idx
+
+    def _curses_prompt(self, stdscr, label: str) -> str:
+        curses.echo()
+        stdscr.clear()
+        stdscr.addstr(0, 0, f"{label}: ")
+        stdscr.refresh()
+        data = stdscr.getstr(0, len(label) + 2).decode("utf-8", errors="ignore").strip()
+        curses.noecho()
+        return data
+
+    def _curses_message(self, stdscr, msg: str) -> None:
+        stdscr.clear()
+        stdscr.addstr(0, 0, msg)
+        stdscr.addstr(2, 0, "Press any key...")
+        stdscr.refresh()
+        stdscr.getch()
+
     async def _connect_dm_by_user_id(self, user_id: int) -> None:
+        voice, label = await self._open_dm_connection_by_id(user_id)
+        await self._handle_connected_voice(voice, label)
+
+    async def _open_dm_connection_by_id(self, user_id: int):
         user = self.get_user(user_id) or await self.fetch_user(user_id)
         if user is None:
             raise RuntimeError(f"User not found: {user_id}")
@@ -132,7 +355,8 @@ class VoiceSelfClient(discord.Client):
         print(f"Connecting to DM call with {user} (ring={self.args.ring})...")
         voice = await dm.connect(reconnect=True, ring=self.args.ring)
         await self._after_connect_dave_checks(voice)
-        await self._handle_connected_voice(voice, f"DM:{user}")
+        return voice, f"DM:{user}"
+        await self._handle_connected_voice(voice, label)
 
     async def _connect_dm_from_list(self) -> None:
         dm_channels = [ch for ch in self.private_channels if isinstance(ch, discord.DMChannel)]
@@ -157,6 +381,10 @@ class VoiceSelfClient(discord.Client):
         await self._handle_connected_voice(voice, f"DM:{recipient_label}")
 
     async def _connect_guild_voice(self, guild_id: int, channel_id: int) -> None:
+        voice, label = await self._open_guild_connection(guild_id, channel_id)
+        await self._handle_connected_voice(voice, label)
+
+    async def _open_guild_connection(self, guild_id: int, channel_id: int):
         guild = self.get_guild(guild_id)
         if guild is None:
             raise RuntimeError(f"Guild not found: {guild_id}")
@@ -166,7 +394,7 @@ class VoiceSelfClient(discord.Client):
         print(f"Connecting to {guild.name}/{channel.name}...")
         voice = await channel.connect(reconnect=True, self_deaf=False, self_mute=False)
         await self._after_connect_dave_checks(voice)
-        await self._handle_connected_voice(voice, f"{guild.name}/{channel.name}")
+        return voice, f"{guild.name}/{channel.name}"
 
     async def _connect_guild_from_list(self) -> None:
         guilds = sorted(self.guilds, key=lambda g: g.name.lower())
@@ -198,6 +426,11 @@ class VoiceSelfClient(discord.Client):
             await self._wait_for_dave_status(voice, timeout=self.args.dave_wait_timeout)
         if self.args.require_dave:
             self._enforce_dave_or_raise(voice)
+
+    async def _disconnect_voice(self, voice: discord.VoiceClient) -> None:
+        if voice.is_playing():
+            voice.stop()
+        await voice.disconnect(force=True)
 
     async def _hold_connection(self, voice: discord.VoiceClient, label: str) -> None:
         print(f"Connected to {label}. Press Ctrl+C to disconnect.")
@@ -627,6 +860,17 @@ def parse_args() -> argparse.Namespace:
     tui.add_argument("--dave-debug", action="store_true", help="Print DAVE negotiation status after connect")
     tui.add_argument("--require-dave", action="store_true", help="Abort if DAVE is not active/encrypting")
     tui.add_argument("--dave-wait-timeout", type=float, default=10.0, help="Seconds to wait for DAVE encryption readiness")
+
+    ctui = sub.add_parser("ctui", help="Curses full-screen TUI for DM/Guild connect and live control")
+    ctui.add_argument("--ring", action="store_true", help="Ring user when starting DM call")
+    ctui.add_argument("--file", default="rickroll.ogg", help="Default file path in Curses TUI")
+    ctui.add_argument("--noise-amp", type=float, default=0.08, help="Default noise amplitude")
+    ctui.add_argument("--pulse-source", default=None, help="Default PulseAudio source")
+    ctui.add_argument("--pulse-sink", default=None, help="Default PulseAudio sink")
+    ctui.add_argument("--ffmpeg-path", default=None, help="Path to ffmpeg binary")
+    ctui.add_argument("--dave-debug", action="store_true", help="Print DAVE negotiation status after connect")
+    ctui.add_argument("--require-dave", action="store_true", help="Abort if DAVE is not active/encrypting")
+    ctui.add_argument("--dave-wait-timeout", type=float, default=10.0, help="Seconds to wait for DAVE encryption readiness")
 
     args = parser.parse_args()
     cfg = load_local_config(args.config)

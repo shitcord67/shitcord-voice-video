@@ -42,6 +42,9 @@ interactive TUI (DM/Guild -> Input ID/List -> connect):
 once connected in TUI, use `session>` commands without restarting:
 `help`, `mode file|noise|mic|connect`, `file <path>`, `source <pulse_source>`, `sink <pulse_sink>`, `switch`, `leave`
 
+curses full-screen TUI:
+`python selfbot_voice.py ctui --dave-debug --dave-wait-timeout 20`
+
 # send audio (pipewire/pulseaudio)
 use a virtual microphone and feed it with generated noise or a file:
 
