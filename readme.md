@@ -1,5 +1,5 @@
 # quick start
-use the launcher script (auto-creates/uses `.venv`, installs requirements if needed):
+preferred: start CTUI via the launcher script (auto-creates/uses `.venv`, installs requirements if needed):
 `./start-selfbot.sh`
 
 quick targets:
