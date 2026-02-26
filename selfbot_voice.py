@@ -308,7 +308,17 @@ class VoiceSelfClient(discord.Client):
                 choice = self._curses_menu(
                     stdscr,
                     "Main",
-                    ["Connect DM", "Connect Guild", "Recent", "Find User in Voice", "Quick Jump", "Audio Settings", "Missed Calls", "Quit"],
+                    [
+                        "Join/Accept DM Call",
+                        "Connect DM",
+                        "Connect Guild",
+                        "Recent",
+                        "Find User in Voice",
+                        "Quick Jump",
+                        "Audio Settings",
+                        "Missed Calls",
+                        "Quit",
+                    ],
                     allow_ctrl_k=True,
                 )
                 if choice == -1:
@@ -317,6 +327,10 @@ class VoiceSelfClient(discord.Client):
                         voice, label = conn
                     continue
                 if choice == 0:
+                    conn = self._ctui_quick_dm_call(stdscr, loop)
+                    if conn is not None:
+                        voice, label = conn
+                elif choice == 1:
                     target = self._curses_menu(stdscr, "DM", ["Input ID", "List", f"Toggle Ring ({'ON' if self.args.ring else 'OFF'})", "Back"])
                     if target == 0:
                         raw = self._curses_prompt(stdscr, "User ID")
@@ -357,7 +371,7 @@ class VoiceSelfClient(discord.Client):
                                     self._curses_message(stdscr, f"Error: {e}")
                     elif target == 2:
                         self.args.ring = not self.args.ring
-                elif choice == 1:
+                elif choice == 2:
                     target = self._curses_menu(stdscr, "Guild", ["Input IDs", "List", "Back"])
                     if target == 0:
                         g = self._curses_prompt(stdscr, "Guild ID")
@@ -405,21 +419,21 @@ class VoiceSelfClient(discord.Client):
                                     voice, label = run(self._open_guild_connection(guild.id, ch.id))
                                 except Exception as e:
                                     self._curses_message(stdscr, f"Error: {e}")
-                elif choice == 2:
+                elif choice == 3:
                     conn = self._ctui_connect_recent(stdscr, loop)
                     if conn is not None:
                         voice, label = conn
-                elif choice == 3:
+                elif choice == 4:
                     conn = self._ctui_find_user_in_voice(stdscr, loop)
                     if conn is not None:
                         voice, label = conn
-                elif choice == 4:
+                elif choice == 5:
                     conn = self._ctui_quick_jump(stdscr, loop)
                     if conn is not None:
                         voice, label = conn
-                elif choice == 5:
-                    self._ctui_audio_settings(stdscr)
                 elif choice == 6:
+                    self._ctui_audio_settings(stdscr)
+                elif choice == 7:
                     self._ctui_show_missed_calls(stdscr)
                 else:
                     return
@@ -434,6 +448,7 @@ class VoiceSelfClient(discord.Client):
                         "Show debug log",
                         "Show missed calls",
                         "Show call log",
+                        "Join/Accept DM Call",
                         "Quick Jump (Ctrl+K)",
                         "Switch target (disconnect)",
                         "Disconnect",
@@ -480,10 +495,20 @@ class VoiceSelfClient(discord.Client):
                         pass
                     voice = None
                     label = ""
+                    conn = self._ctui_quick_dm_call(stdscr, loop)
+                    if conn is not None:
+                        voice, label = conn
+                elif choice == 7:
+                    try:
+                        run(self._disconnect_voice(voice))
+                    except Exception:
+                        pass
+                    voice = None
+                    label = ""
                     conn = self._ctui_quick_jump(stdscr, loop)
                     if conn is not None:
                         voice, label = conn
-                elif choice in (7, 8):
+                elif choice in (8, 9):
                     try:
                         run(self._disconnect_voice(voice))
                     except Exception:
@@ -1186,6 +1211,52 @@ class VoiceSelfClient(discord.Client):
             return None
         self._curses_message(stdscr, "Unknown quick-jump target type.")
         return None
+
+    def _ctui_quick_dm_call(self, stdscr, loop: asyncio.AbstractEventLoop):
+        dm_channels = [ch for ch in self.private_channels if isinstance(ch, discord.DMChannel)]
+        if not dm_channels:
+            self._curses_message(stdscr, "No DM channels found.")
+            return None
+
+        prio = {
+            "incoming-ring": 0,
+            "friend-in-call": 1,
+            "both-in-call": 2,
+            "call-active": 3,
+            "outgoing-ring": 4,
+            "you-in-call": 5,
+            "call-open": 6,
+            "idle": 9,
+            "unavailable": 10,
+        }
+
+        rows = []
+        for dm in dm_channels:
+            status = self._dm_call_status(dm)
+            if status in ("idle", "unavailable"):
+                continue
+            who = str(dm.recipient) if dm.recipient else f"unknown ({dm.id})"
+            rows.append((prio.get(status, 99), who.lower(), dm, status))
+
+        if not rows:
+            self._curses_message(stdscr, "No active/incoming DM voice calls right now.")
+            return None
+
+        rows.sort(key=lambda x: (x[0], x[1]))
+        labels = [f"{who} [{status}]" for _, who, _, status in rows]
+        idx = self._curses_menu(stdscr, "Join/Accept DM Call (incoming first)", labels + ["Back"])
+        if idx >= len(rows):
+            return None
+        dm = rows[idx][2]
+        uid = dm.recipient.id if dm.recipient else None
+        if uid is None:
+            self._curses_message(stdscr, "Selected DM has no recipient id.")
+            return None
+        try:
+            return asyncio.run_coroutine_threadsafe(self._open_dm_connection_by_id(int(uid)), loop).result()
+        except Exception as e:
+            self._curses_message(stdscr, f"Error: {e}")
+            return None
 
     async def _connect_guild_from_list(self) -> None:
         guilds = sorted(self.guilds, key=lambda g: g.name.lower())
