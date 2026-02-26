@@ -1177,6 +1177,8 @@ class VoiceSelfClient(discord.Client):
         try:
             op = msg.get("op")
             data = msg.get("d") or {}
+            if op in (2, 11, 12, 13):
+                self._dbg(f"voice ws op={op} data={data}")
             if op == 5:  # SPEAKING
                 raw_uid = data.get("user_id")
                 if raw_uid is None:

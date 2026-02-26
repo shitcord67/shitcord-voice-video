@@ -52,6 +52,8 @@ experimental video branch notes:
 `--exp-video-opcode` sends the voice websocket VIDEO opcode after connect.
 while connected in ctui, use `Toggle self camera flag (exp)` to flip self camera flag live.
 while connected in ctui, use `Send VIDEO opcode (exp)` for explicit signaling tests.
+quick launcher for this branch:
+`./start-video-exp.sh` (writes logs to `./video-exp.log`, override with `VIDEO_EXP_LOG=...`).
 
 # OLD (node prototype)
 status: receiving and sending audio works (tested on linux and macos)
