@@ -1,10 +1,3 @@
-# status
-receiving and sending audio works (tested on linux and macos)
-# requirements
-relies on discord's custom voice engine built atop WebRTC, which can be fetched using `node downloadVoiceModule.js`. extract `discord_voice.zip` into `node_modules`.
-# usage
-`node example.js <token> <guild id> <channel id>`
-
 # python selfbot prototype (discord.py-self)
 this is a separate path from the node native module.
 
@@ -51,8 +44,18 @@ guild list shows `vc_users` + `active_vc`.
 in voice-channel lists press `u` to open a searchable member list.
 main menu has `Find User in Voice` for global searchable user-in-voice lookup with quick join.
 `Ctrl+K` quick jump, mouse click selection (if terminal supports it), incoming call notifications, missed-call list, and connected-user talk/mic/spk panel.
+press `p` in voice-user/member lists for SIXEL user avatar preview.
 
-# send audio (pipewire/pulseaudio)
+# OLD (node prototype)
+status: receiving and sending audio works (tested on linux and macos)
+
+requirements:
+relies on discord's custom voice engine built atop WebRTC, which can be fetched using `node downloadVoiceModule.js`. extract `discord_voice.zip` into `node_modules`.
+
+usage:
+`node example.js <token> <guild id> <channel id>`
+
+send audio (pipewire/pulseaudio):
 use a virtual microphone and feed it with generated noise or a file:
 
 terminal 1:
@@ -64,7 +67,7 @@ or:
 terminal 2 (join + transmit):
 `VOICE_SET_DEVICES=1 VOICE_INPUT_DEVICE=discord_tx_source node example.js <token> <guild id> <channel id>`
 
-# record received audio
+record received audio:
 native capture in `discord_voice` is unstable on some setups and can segfault.
 
 recommended (stable): record the system output monitor with ffmpeg while the bot is connected.
@@ -77,5 +80,3 @@ example:
 
 if you still want to force native capture (unsafe):
 `VOICE_CAPTURE=1 VOICE_CAPTURE_BACKEND=native VOICE_CAPTURE_FILE=./recv.ogg node example.js <token> <guild id> <channel id>`
-
-press `p` in voice-user/member lists for SIXEL user avatar preview.
