@@ -33,6 +33,9 @@ ring user when starting dm call:
 print DAVE negotiation status:
 `python selfbot_voice.py play --mode file --file ./rickroll.ogg --dave-debug`
 
+require DAVE (abort if not encrypted/active):
+`python selfbot_voice.py play --mode file --file ./rickroll.ogg --require-dave`
+
 # send audio (pipewire/pulseaudio)
 use a virtual microphone and feed it with generated noise or a file:
 

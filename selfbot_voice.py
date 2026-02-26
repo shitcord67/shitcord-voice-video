@@ -60,8 +60,10 @@ class VoiceSelfClient(discord.Client):
 
         print(f"Connecting to {guild.name}/{channel.name}...")
         voice = await channel.connect(reconnect=False, self_deaf=False, self_mute=False)
-        if self.args.dave_debug:
+        if self.args.dave_debug or self.args.require_dave:
             await self._print_dave_status(voice)
+        if self.args.require_dave:
+            self._enforce_dave_or_raise(voice)
         await self._play_to_voice_client(voice, f"{guild.name}/{channel.name}")
 
     async def _play_dm_audio(self) -> None:
@@ -75,8 +77,10 @@ class VoiceSelfClient(discord.Client):
 
         print(f"Connecting to DM call with {user} (ring={self.args.ring})...")
         voice = await dm.connect(reconnect=False, ring=self.args.ring)
-        if self.args.dave_debug:
+        if self.args.dave_debug or self.args.require_dave:
             await self._print_dave_status(voice)
+        if self.args.require_dave:
+            self._enforce_dave_or_raise(voice)
         await self._play_to_voice_client(voice, f"DM:{user}")
 
     async def _print_dave_status(self, voice: discord.VoiceClient) -> None:
@@ -98,6 +102,17 @@ class VoiceSelfClient(discord.Client):
             f"session={'yes' if session else 'no'}",
             f"privacy_code={privacy_code}",
         )
+
+    def _enforce_dave_or_raise(self, voice: discord.VoiceClient) -> None:
+        conn = getattr(voice, "_connection", None)
+        if conn is None:
+            raise RuntimeError("DAVE required but voice internals are unavailable")
+        active_proto = getattr(conn, "dave_protocol_version", 0) or 0
+        can_encrypt = bool(getattr(conn, "can_encrypt", False))
+        if active_proto <= 0 or not can_encrypt:
+            raise RuntimeError(
+                f"DAVE required but not active (active_protocol={active_proto}, can_encrypt={can_encrypt})"
+            )
 
     def _make_audio_source(self, ffmpeg: str) -> discord.AudioSource:
         if self.args.mode == "file":
@@ -186,6 +201,7 @@ def parse_args() -> argparse.Namespace:
     play.add_argument("--noise-amp", type=float, default=0.08, help="Noise amplitude (0.0-1.0)")
     play.add_argument("--ffmpeg-path", default=None, help="Path to ffmpeg binary")
     play.add_argument("--dave-debug", action="store_true", help="Print DAVE negotiation status after connect")
+    play.add_argument("--require-dave", action="store_true", help="Abort if DAVE is not active/encrypting")
 
     dm_play = sub.add_parser("dm-play", help="Start/join DM call and play audio")
     dm_play.add_argument("--user-id", type=int, required=False, help="Target user id for DM call")
@@ -196,6 +212,7 @@ def parse_args() -> argparse.Namespace:
     dm_play.add_argument("--noise-amp", type=float, default=0.08, help="Noise amplitude (0.0-1.0)")
     dm_play.add_argument("--ffmpeg-path", default=None, help="Path to ffmpeg binary")
     dm_play.add_argument("--dave-debug", action="store_true", help="Print DAVE negotiation status after connect")
+    dm_play.add_argument("--require-dave", action="store_true", help="Abort if DAVE is not active/encrypting")
 
     args = parser.parse_args()
     cfg = load_local_config(args.config)
