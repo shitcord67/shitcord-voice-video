@@ -39,6 +39,9 @@ require DAVE (abort if not encrypted/active):
 interactive TUI (DM/Guild -> Input ID/List -> connect):
 `python selfbot_voice.py tui --dave-debug --dave-wait-timeout 20`
 
+once connected in TUI, use `session>` commands without restarting:
+`help`, `mode file|noise|mic|connect`, `file <path>`, `source <pulse_source>`, `sink <pulse_sink>`, `switch`, `leave`
+
 # send audio (pipewire/pulseaudio)
 use a virtual microphone and feed it with generated noise or a file:
 

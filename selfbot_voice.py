@@ -210,10 +210,159 @@ class VoiceSelfClient(discord.Client):
             await voice.disconnect(force=True)
 
     async def _handle_connected_voice(self, voice: discord.VoiceClient, label: str) -> None:
-        if self.args.mode in ("file", "noise", "mic"):
+        if self.args.command == "tui":
+            await self._session_control_loop(voice, label)
+        elif self.args.mode in ("file", "noise", "mic"):
             await self._play_to_voice_client(voice, label)
         else:
             await self._hold_connection(voice, label)
+
+    async def _session_control_loop(self, voice: discord.VoiceClient, label: str) -> None:
+        print(f"Connected to {label}.")
+        await self._restart_playback(voice, label)
+        self._print_session_help()
+
+        while True:
+            try:
+                raw = await asyncio.to_thread(input, "session> ")
+            except (EOFError, KeyboardInterrupt):
+                raw = "leave"
+            cmd = raw.strip()
+            if not cmd:
+                continue
+
+            parts = cmd.split()
+            head = parts[0].lower()
+
+            if head in ("help", "?"):
+                self._print_session_help()
+            elif head == "status":
+                self._print_session_status()
+            elif head == "dave":
+                await self._wait_for_dave_status(voice, timeout=max(0.5, self.args.dave_wait_timeout))
+            elif head == "mode":
+                if len(parts) < 2 or parts[1] not in ("file", "noise", "mic", "connect"):
+                    print("Usage: mode <file|noise|mic|connect>")
+                    continue
+                self.args.mode = parts[1]
+                await self._restart_playback(voice, label)
+            elif head == "file":
+                if len(parts) < 2:
+                    print("Usage: file <path>")
+                    continue
+                self.args.file = " ".join(parts[1:])
+                self.args.mode = "file"
+                await self._restart_playback(voice, label)
+            elif head == "loop":
+                if len(parts) < 2 or parts[1] not in ("on", "off"):
+                    print("Usage: loop <on|off>")
+                    continue
+                self.args.loop = parts[1] == "on"
+                if self.args.mode == "file":
+                    await self._restart_playback(voice, label)
+            elif head == "amp":
+                if len(parts) < 2:
+                    print("Usage: amp <0..1>")
+                    continue
+                try:
+                    self.args.noise_amp = float(parts[1])
+                except ValueError:
+                    print("Invalid amplitude.")
+                    continue
+                if self.args.mode == "noise":
+                    await self._restart_playback(voice, label)
+            elif head == "sources":
+                self._print_pulse_devices("sources")
+            elif head == "sinks":
+                self._print_pulse_devices("sinks")
+            elif head == "source":
+                if len(parts) < 2:
+                    print("Usage: source <pulse-source-name>")
+                    continue
+                self.args.pulse_source = " ".join(parts[1:])
+                self._set_default_pulse_device("source", self.args.pulse_source)
+                print(f"Pulse default source set to: {self.args.pulse_source}")
+                if self.args.mode == "mic":
+                    await self._restart_playback(voice, label)
+            elif head == "sink":
+                if len(parts) < 2:
+                    print("Usage: sink <pulse-sink-name>")
+                    continue
+                self.args.pulse_sink = " ".join(parts[1:])
+                self._set_default_pulse_device("sink", self.args.pulse_sink)
+                print(f"Pulse default sink set to: {self.args.pulse_sink}")
+            elif head == "restart":
+                await self._restart_playback(voice, label)
+            elif head == "switch":
+                print("Disconnecting and returning to target selection...")
+                if voice.is_playing():
+                    voice.stop()
+                await voice.disconnect(force=True)
+                return
+            elif head == "leave":
+                print("Disconnecting...")
+                if voice.is_playing():
+                    voice.stop()
+                await voice.disconnect(force=True)
+                return
+            elif head in ("quit", "exit"):
+                print("Disconnecting and exiting...")
+                if voice.is_playing():
+                    voice.stop()
+                await voice.disconnect(force=True)
+                raise SystemExit(0)
+            else:
+                print("Unknown command. Type 'help'.")
+
+    async def _restart_playback(self, voice: discord.VoiceClient, label: str) -> None:
+        if voice.is_playing():
+            voice.stop()
+            await asyncio.sleep(0.05)
+
+        if self.args.mode == "connect":
+            print(f"Connected to {label} (no audio playback).")
+            return
+
+        ffmpeg = self.args.ffmpeg_path or shutil.which("ffmpeg")
+        if ffmpeg is None:
+            raise RuntimeError("ffmpeg not found. Install ffmpeg or pass --ffmpeg-path")
+        source = self._make_audio_source(ffmpeg)
+        voice.play(source, after=lambda err: print(f"Playback error: {err}") if err else None)
+        if self.args.mode == "file":
+            print(f"Now playing file (loop={self.args.loop}): {self.args.file}")
+        elif self.args.mode == "noise":
+            print(f"Now playing noise (amp={self.args.noise_amp})")
+        elif self.args.mode == "mic":
+            print(f"Now streaming microphone source: {self.args.pulse_source or 'default'}")
+
+    def _print_session_help(self) -> None:
+        print("Commands:")
+        print("  help                 show this help")
+        print("  status               show current playback/device settings")
+        print("  dave                 print current DAVE status")
+        print("  mode <file|noise|mic|connect>")
+        print("  file <path>          set file path and switch to file mode")
+        print("  loop <on|off>        toggle file looping")
+        print("  amp <0..1>           set noise amplitude")
+        print("  sources              list PulseAudio sources")
+        print("  sinks                list PulseAudio sinks")
+        print("  source <name>        set PulseAudio source (for mic mode)")
+        print("  sink <name>          set PulseAudio sink")
+        print("  restart              restart current playback mode")
+        print("  switch               disconnect and select another target")
+        print("  leave                disconnect and return to menu")
+        print("  quit                 disconnect and exit app")
+
+    def _print_session_status(self) -> None:
+        print(
+            "Status:",
+            f"mode={self.args.mode}",
+            f"file={self.args.file}",
+            f"loop={self.args.loop}",
+            f"noise_amp={self.args.noise_amp}",
+            f"pulse_source={self.args.pulse_source or 'default'}",
+            f"pulse_sink={self.args.pulse_sink or '(unchanged)'}",
+        )
 
     def _select_menu(self, title: str, items: list[str]) -> int:
         print(f"\n{title}:")
@@ -303,6 +452,15 @@ class VoiceSelfClient(discord.Client):
         cmd = ["pactl", f"set-default-{kind}", name]
         subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+    def _print_pulse_devices(self, kind: str) -> None:
+        devices = self._pulse_devices(kind)
+        if not devices:
+            print(f"No PulseAudio {kind} found.")
+            return
+        print(f"PulseAudio {kind}:")
+        for dev in devices:
+            print(f"  - {dev}")
+
     async def _wait_for_dave_status(self, voice: discord.VoiceClient, *, timeout: float) -> None:
         deadline = asyncio.get_running_loop().time() + timeout
         while True:
@@ -349,6 +507,7 @@ class VoiceSelfClient(discord.Client):
             return discord.FFmpegPCMAudio(
                 source=self.args.file,
                 executable=ffmpeg,
+                before_options="-stream_loop -1 -re" if self.args.loop else None,
                 options="-vn",
             )
         if self.args.mode == "mic":
