@@ -2013,7 +2013,7 @@ async def _run(args: argparse.Namespace) -> None:
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="discord.py-self voice helper")
+    parser = argparse.ArgumentParser(description="shitcord-voice+video")
     parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, help=f"Path to local config json (default: {DEFAULT_CONFIG_PATH})")
     parser.add_argument("--token", help="Discord user token (or set DISCORD_USER_TOKEN)")
     parser.add_argument("--log-file", default=None, help="Append debug/errors to this file")

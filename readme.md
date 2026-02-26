@@ -34,7 +34,7 @@ microphone input format:
 `./start-selfbot.sh -- --mic-input-format pipewire`
 - available choices: `auto|pulse|pipewire|alsa`
 
-# python selfbot prototype (discord.py-self)
+# shitcord-voice+video
 this is a separate path from the node native module.
 
 local config file (already git-ignored):
