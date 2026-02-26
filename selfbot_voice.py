@@ -778,8 +778,15 @@ class VoiceSelfClient(discord.Client):
     def _curses_message(self, stdscr, msg: str) -> None:
         stdscr.timeout(-1)
         stdscr.clear()
-        self._safe_addstr(stdscr, 0, 0, msg)
-        self._safe_addstr(stdscr, 2, 0, "Press any key...")
+        max_y, _ = stdscr.getmaxyx()
+        y = 0
+        for part in (msg or "").splitlines() or [""]:
+            before = y
+            self._curses_add_wrapped(stdscr, y, 0, part)
+            y = before + max(1, (len(part) // max(1, stdscr.getmaxyx()[1] - 1)) + 1)
+            if y >= max_y - 2:
+                break
+        self._safe_addstr(stdscr, max(0, max_y - 2), 0, "Press any key...")
         stdscr.refresh()
         stdscr.getch()
 
@@ -991,6 +998,37 @@ class VoiceSelfClient(discord.Client):
             return ["  (disconnected)"][:limit]
         channel = getattr(voice, "channel", None)
         members = getattr(channel, "members", None)
+        if not members and isinstance(channel, discord.DMChannel):
+            call = getattr(channel, "call", None)
+            vs_map = getattr(call, "voice_states", {}) if call else {}
+            recipient = getattr(channel, "recipient", None)
+            me = self.user
+            dm_users = []
+            if me is not None:
+                dm_users.append(me)
+            if recipient is not None:
+                dm_users.append(recipient)
+            lines: list[str] = []
+            for user in dm_users:
+                vs = vs_map.get(int(user.id)) if isinstance(vs_map, dict) else None
+                in_call = vs is not None
+                mic_muted = bool(getattr(vs, "self_mute", False) or getattr(vs, "mute", False)) if in_call else False
+                spk_deaf = bool(getattr(vs, "self_deaf", False) or getattr(vs, "deaf", False)) if in_call else False
+                cam_on = bool(getattr(vs, "self_video", False)) if in_call else False
+                stream_on = bool(getattr(vs, "self_stream", False)) if in_call else False
+                talking = self._is_user_talking(user.id)
+                talk_mark = "*" if talking else "."
+                mic_mark = "MUTED" if mic_muted else "open"
+                spk_mark = "DEAF" if spk_deaf else "on"
+                cam_mark = "on" if cam_on else "off"
+                stream_mark = "on" if stream_on else "off"
+                in_mark = "in" if in_call else "out"
+                lines.append(
+                    f"  {talk_mark} [{in_mark}] mic={mic_mark:<5} spk={spk_mark:<4} cam={cam_mark:<3} scr={stream_mark:<3} {user} ({user.id})"
+                )
+                if len(lines) >= limit:
+                    break
+            return lines[:limit] if lines else ["  (no members visible)"][:limit]
         if not members:
             return ["  (no members visible)"][:limit]
 
