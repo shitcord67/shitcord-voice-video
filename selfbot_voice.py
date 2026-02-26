@@ -38,6 +38,13 @@ class VoiceSelfClient(discord.Client):
         self._active_notice: Optional[dict[str, Any]] = None
         self._call_history: list[dict[str, Any]] = []
         self._active_call_records: dict[int, int] = {}
+        self._last_connect_global: float = 0.0
+        self._last_connect_target: dict[str, float] = {}
+        self._events: dict[str, list[float]] = {
+            "connect": [],
+            "ring": [],
+            "fetch_user": [],
+        }
 
     async def on_ready(self):
         try:
@@ -203,6 +210,7 @@ class VoiceSelfClient(discord.Client):
                 print(f"  - {ch.name} (channel_id={ch.id}, members={members})")
 
     async def _play_audio(self) -> None:
+        self._enforce_connect_safety(f"guild:{self.args.guild_id}:{self.args.channel_id}")
         guild = self.get_guild(self.args.guild_id)
         if guild is None:
             raise RuntimeError(f"Guild not found: {self.args.guild_id}")
@@ -223,7 +231,11 @@ class VoiceSelfClient(discord.Client):
             await self._play_to_voice_client(voice, f"{guild.name}/{channel.name}")
 
     async def _play_dm_audio(self) -> None:
-        user = self.get_user(self.args.user_id) or await self.fetch_user(self.args.user_id)
+        self._enforce_connect_safety(f"dm:{self.args.user_id}")
+        user = self.get_user(self.args.user_id)
+        if user is None:
+            self._enforce_fetch_user_safety()
+            user = await self.fetch_user(self.args.user_id)
         if user is None:
             raise RuntimeError(f"User not found: {self.args.user_id}")
 
@@ -232,6 +244,8 @@ class VoiceSelfClient(discord.Client):
             raise RuntimeError(f"Could not open DM channel with user {self.args.user_id}")
 
         print(f"Connecting to DM call with {user} (ring={self.args.ring})...")
+        if self.args.ring:
+            self._enforce_ring_safety()
         voice = await dm.connect(reconnect=True, ring=self.args.ring)
         if self.args.dave_debug or self.args.require_dave:
             await self._wait_for_dave_status(voice, timeout=self.args.dave_wait_timeout)
@@ -1054,18 +1068,80 @@ class VoiceSelfClient(discord.Client):
         except Exception:
             return
 
+    def _safety_enabled(self) -> bool:
+        return not bool(getattr(self.args, "safe_disable", False))
+
+    def _prune_events(self, kind: str, *, now: float, window: float) -> None:
+        events = self._events.get(kind)
+        if events is None:
+            return
+        self._events[kind] = [t for t in events if (now - t) <= window]
+
+    def _enforce_rate_limit(self, kind: str, *, window: float, limit: int, label: str) -> None:
+        if not self._safety_enabled():
+            return
+        now = time.monotonic()
+        self._prune_events(kind, now=now, window=window)
+        events = self._events[kind]
+        if len(events) >= limit:
+            raise RuntimeError(f"Safety guard: too many {label} actions ({len(events)}/{limit}) in {int(window)}s window")
+        events.append(now)
+
+    def _enforce_connect_safety(self, target_key: str) -> None:
+        if not self._safety_enabled():
+            return
+        now = time.monotonic()
+        min_interval = max(0.0, float(getattr(self.args, "safe_connect_min_interval", 5.0)))
+        target_cooldown = max(0.0, float(getattr(self.args, "safe_same_target_cooldown", 15.0)))
+        max_connects = max(1, int(getattr(self.args, "safe_max_connects_10m", 30)))
+
+        if (now - self._last_connect_global) < min_interval:
+            wait_s = max(0.0, min_interval - (now - self._last_connect_global))
+            raise RuntimeError(f"Safety guard: connect too soon. Wait {wait_s:.1f}s before connecting again.")
+
+        last_target = self._last_connect_target.get(target_key)
+        if last_target is not None and (now - last_target) < target_cooldown:
+            wait_s = max(0.0, target_cooldown - (now - last_target))
+            raise RuntimeError(f"Safety guard: reconnect to same target too soon. Wait {wait_s:.1f}s.")
+
+        self._enforce_rate_limit("connect", window=600.0, limit=max_connects, label="connect")
+        self._last_connect_global = now
+        self._last_connect_target[target_key] = now
+
+    def _enforce_fetch_user_safety(self) -> None:
+        self._enforce_rate_limit(
+            "fetch_user",
+            window=60.0,
+            limit=max(1, int(getattr(self.args, "safe_max_fetch_user_1m", 30))),
+            label="user fetch",
+        )
+
+    def _enforce_ring_safety(self) -> None:
+        self._enforce_rate_limit(
+            "ring",
+            window=600.0,
+            limit=max(1, int(getattr(self.args, "safe_max_rings_10m", 10))),
+            label="ring",
+        )
+
     async def _connect_dm_by_user_id(self, user_id: int) -> None:
         voice, label = await self._open_dm_connection_by_id(user_id)
         await self._handle_connected_voice(voice, label)
 
     async def _open_dm_connection_by_id(self, user_id: int):
-        user = self.get_user(user_id) or await self.fetch_user(user_id)
+        self._enforce_connect_safety(f"dm:{user_id}")
+        user = self.get_user(user_id)
+        if user is None:
+            self._enforce_fetch_user_safety()
+            user = await self.fetch_user(user_id)
         if user is None:
             raise RuntimeError(f"User not found: {user_id}")
         dm = user.dm_channel or await user.create_dm()
         if dm is None:
             raise RuntimeError(f"Could not open DM channel with user {user_id}")
         print(f"Connecting to DM call with {user} (ring={self.args.ring})...")
+        if self.args.ring:
+            self._enforce_ring_safety()
         voice = await dm.connect(reconnect=True, ring=self.args.ring)
         self._attach_voice_ws_hook(voice)
         await self._after_connect_dave_checks(voice)
@@ -1096,7 +1172,11 @@ class VoiceSelfClient(discord.Client):
             return
         chosen = dm_channels[idx]
         recipient_label = str(chosen.recipient) if chosen.recipient else f"channel:{chosen.id}"
+        target_key = f"dm:{chosen.recipient.id}" if chosen.recipient else f"dm-ch:{chosen.id}"
+        self._enforce_connect_safety(target_key)
         print(f"Connecting to DM call with {recipient_label} (ring={self.args.ring})...")
+        if self.args.ring:
+            self._enforce_ring_safety()
         voice = await chosen.connect(reconnect=True, ring=self.args.ring)
         await self._after_connect_dave_checks(voice)
         await self._handle_connected_voice(voice, f"DM:{recipient_label}")
@@ -1106,6 +1186,7 @@ class VoiceSelfClient(discord.Client):
         await self._handle_connected_voice(voice, label)
 
     async def _open_guild_connection(self, guild_id: int, channel_id: int):
+        self._enforce_connect_safety(f"guild:{guild_id}:{channel_id}")
         guild = self.get_guild(guild_id)
         if guild is None:
             raise RuntimeError(f"Guild not found: {guild_id}")
@@ -1789,6 +1870,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--config", default=DEFAULT_CONFIG_PATH, help=f"Path to local config json (default: {DEFAULT_CONFIG_PATH})")
     parser.add_argument("--token", help="Discord user token (or set DISCORD_USER_TOKEN)")
     parser.add_argument("--log-file", default=None, help="Append debug/errors to this file")
+    parser.add_argument("--safe-disable", action="store_true", help="Disable built-in safety throttles (not recommended)")
+    parser.add_argument("--safe-connect-min-interval", type=float, default=5.0, help="Minimum seconds between voice connect attempts")
+    parser.add_argument("--safe-same-target-cooldown", type=float, default=15.0, help="Minimum seconds before reconnecting same DM/VC target")
+    parser.add_argument("--safe-max-connects-10m", type=int, default=30, help="Max voice connect attempts allowed per 10 minutes")
+    parser.add_argument("--safe-max-rings-10m", type=int, default=10, help="Max DM ring attempts allowed per 10 minutes")
+    parser.add_argument("--safe-max-fetch-user-1m", type=int, default=30, help="Max user fetch requests allowed per minute")
 
     sub = parser.add_subparsers(dest="command", required=True)
 

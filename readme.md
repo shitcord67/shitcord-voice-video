@@ -16,6 +16,10 @@ launcher modes:
 - headless/direct (no CTUI): `./start-selfbot.sh --direct --dm <user_id> --mode connect`
 - list only: `./start-selfbot.sh --list`
 
+safety defaults:
+- built-in throttles are enabled (connect cooldown + action rate limits)
+- disable only for controlled testing: pass `-- --safe-disable` to the launcher
+
 token handling:
 - reads token from `.voice-config.json` or `DISCORD_USER_TOKEN` by default
 - optional override: `./start-selfbot.sh --token <token>`
