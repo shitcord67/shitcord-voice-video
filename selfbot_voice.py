@@ -36,6 +36,8 @@ class VoiceSelfClient(discord.Client):
         self._log_file: Optional[str] = args.log_file
         self._speaking_activity: dict[int, float] = {}
         self._active_notice: Optional[dict[str, Any]] = None
+        self._call_history: list[dict[str, Any]] = []
+        self._active_call_records: dict[int, int] = {}
 
     async def on_ready(self):
         try:
@@ -62,8 +64,11 @@ class VoiceSelfClient(discord.Client):
         now_ringing = self._is_ringing_me(call)
         if now_ringing and not was_ringing:
             self._handle_call_event(call, "incoming")
+        if self._is_connected_me(call) and not self._is_connected_me(old_call):
+            self._mark_call_answered(call)
 
     async def on_call_delete(self, call) -> None:
+        self._finalize_call(call)
         self._dbg(f"call ended in channel {getattr(call.channel, 'id', '?')}")
 
     def _is_ringing_me(self, call) -> bool:
@@ -83,10 +88,80 @@ class VoiceSelfClient(discord.Client):
         initiator = getattr(call, "initiator", None)
         from_label = str(initiator) if initiator is not None else "unknown"
         msg = f"Incoming call from {from_label} in DM:{peer_label}"
+        self._record_incoming_call(call, from_label, peer_label)
         self._push_notice(msg)
         self._emit_call_sound()
         print(msg)
         self._dbg(f"call {event_name}: {msg}")
+
+    def _is_connected_me(self, call) -> bool:
+        try:
+            return bool(getattr(call, "connected", False))
+        except Exception:
+            return False
+
+    def _record_incoming_call(self, call, from_label: str, peer_label: str) -> None:
+        channel = getattr(call, "channel", None)
+        channel_id = int(getattr(channel, "id", 0) or 0)
+        now = datetime.now().isoformat(timespec="seconds")
+        entry = {
+            "ts": now,
+            "channel_id": channel_id,
+            "peer": peer_label,
+            "from": from_label,
+            "status": "ringing",
+            "answered": False,
+            "missed": False,
+        }
+        for key in list(self._active_call_records.keys()):
+            self._active_call_records[key] = int(self._active_call_records[key]) + 1
+        self._call_history.insert(0, entry)
+        self._call_history = self._call_history[:100]
+        max_idx = len(self._call_history) - 1
+        for key, idx in list(self._active_call_records.items()):
+            if idx > max_idx:
+                self._active_call_records.pop(key, None)
+        self._active_call_records[channel_id] = 0
+
+    def _mark_call_answered(self, call) -> None:
+        channel_id = int(getattr(getattr(call, "channel", None), "id", 0) or 0)
+        idx = self._active_call_records.get(channel_id)
+        if idx is None:
+            return
+        if idx < 0 or idx >= len(self._call_history):
+            return
+        entry = self._call_history[idx]
+        entry["answered"] = True
+        entry["status"] = "answered"
+        entry["missed"] = False
+        self._dbg(f"call answered: {entry.get('peer')} channel={channel_id}")
+
+    def _finalize_call(self, call) -> None:
+        channel_id = int(getattr(getattr(call, "channel", None), "id", 0) or 0)
+        idx = self._active_call_records.pop(channel_id, None)
+        if idx is None or idx < 0 or idx >= len(self._call_history):
+            return
+        entry = self._call_history[idx]
+        if entry.get("answered"):
+            entry["status"] = "ended"
+        else:
+            entry["status"] = "missed"
+            entry["missed"] = True
+            self._push_notice(f"Missed call: {entry.get('peer')}")
+        self._dbg(f"call finalized: status={entry.get('status')} channel={channel_id}")
+
+    def _missed_call_entries(self) -> list[dict[str, Any]]:
+        return [e for e in self._call_history if e.get("missed")]
+
+    def _recent_call_lines(self, limit: int = 3) -> list[str]:
+        if limit <= 0:
+            return []
+        if not self._call_history:
+            return ["  (no recent calls)"][:limit]
+        lines = []
+        for e in self._call_history[:limit]:
+            lines.append(f"  [{e.get('ts')}] {e.get('status')} {e.get('peer')}")
+        return lines
 
     def _push_notice(self, message: str) -> None:
         persistent = bool(getattr(self.args, "call_notify_persistent", False))
@@ -233,7 +308,7 @@ class VoiceSelfClient(discord.Client):
                 choice = self._curses_menu(
                     stdscr,
                     "Main",
-                    ["Connect DM", "Connect Guild", "Recent", "Find User in Voice", "Quick Jump", "Audio Settings", "Quit"],
+                    ["Connect DM", "Connect Guild", "Recent", "Find User in Voice", "Quick Jump", "Audio Settings", "Missed Calls", "Quit"],
                     allow_ctrl_k=True,
                 )
                 if choice == -1:
@@ -340,6 +415,8 @@ class VoiceSelfClient(discord.Client):
                         voice, label = conn
                 elif choice == 5:
                     self._ctui_audio_settings(stdscr)
+                elif choice == 6:
+                    self._ctui_show_missed_calls(stdscr)
                 else:
                     return
             else:
@@ -351,6 +428,8 @@ class VoiceSelfClient(discord.Client):
                         "Audio settings",
                         "Show DAVE status",
                         "Show debug log",
+                        "Show missed calls",
+                        "Show call log",
                         "Quick Jump (Ctrl+K)",
                         "Switch target (disconnect)",
                         "Disconnect",
@@ -387,6 +466,10 @@ class VoiceSelfClient(discord.Client):
                 elif choice == 3:
                     self._curses_show_debug_log(stdscr)
                 elif choice == 4:
+                    self._ctui_show_missed_calls(stdscr)
+                elif choice == 5:
+                    self._ctui_show_call_log(stdscr)
+                elif choice == 6:
                     try:
                         run(self._disconnect_voice(voice))
                     except Exception:
@@ -396,7 +479,7 @@ class VoiceSelfClient(discord.Client):
                     conn = self._ctui_quick_jump(stdscr, loop)
                     if conn is not None:
                         voice, label = conn
-                elif choice in (5, 6):
+                elif choice in (7, 8):
                     try:
                         run(self._disconnect_voice(voice))
                     except Exception:
@@ -508,8 +591,14 @@ class VoiceSelfClient(discord.Client):
                 self._safe_addstr(stdscr, users_header_y, 0, "Connected users (talk/mic/spk):")
                 max_y, _ = stdscr.getmaxyx()
                 rows_left = max(0, max_y - users_header_y - 1)
-                user_lines = self._collect_connected_user_lines(voice, limit=rows_left)
-                for row, line in enumerate(user_lines, start=users_header_y + 1):
+                user_lines = self._collect_connected_user_lines(voice, limit=max(0, rows_left - 5))
+                end_row = users_header_y + 1
+                for row, line in enumerate(user_lines, start=end_row):
+                    self._safe_addstr(stdscr, row, 0, line)
+                    end_row = row + 1
+                self._safe_addstr(stdscr, end_row, 0, "Recent calls:")
+                call_lines = self._recent_call_lines(limit=max(0, max_y - end_row - 1))
+                for row, line in enumerate(call_lines, start=end_row + 1):
                     self._safe_addstr(stdscr, row, 0, line)
             stdscr.refresh()
             ch = stdscr.getch()
@@ -721,6 +810,24 @@ class VoiceSelfClient(discord.Client):
                 pos = max(0, pos - 1)
             elif ch in (curses.KEY_DOWN, ord("j")):
                 pos = min(len(lines) - 1, pos + 1)
+
+    def _ctui_show_missed_calls(self, stdscr) -> None:
+        missed = self._missed_call_entries()
+        if not missed:
+            self._curses_message(stdscr, "No missed calls.")
+            return
+        labels = [f"[{e.get('ts')}] {e.get('peer')} (from {e.get('from')})" for e in missed]
+        self._curses_menu(stdscr, "Missed calls (search enabled)", labels + ["Back"])
+
+    def _ctui_show_call_log(self, stdscr) -> None:
+        if not self._call_history:
+            self._curses_message(stdscr, "No call history yet.")
+            return
+        labels = [
+            f"[{e.get('ts')}] {e.get('status')} {e.get('peer')} (from {e.get('from')})"
+            for e in self._call_history
+        ]
+        self._curses_menu(stdscr, "Call history (search enabled)", labels + ["Back"])
 
     def _collect_voice_status(self, voice: Optional[discord.VoiceClient]) -> str:
         if voice is None:

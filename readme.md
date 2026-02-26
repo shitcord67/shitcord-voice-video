@@ -50,6 +50,7 @@ type to search in lists (fuzzy in-order; prefix matches ranked first), press `p`
 guild list shows `vc_users` + `active_vc`.
 in voice-channel lists press `u` to open a searchable member list.
 main menu has `Find User in Voice` for global searchable user-in-voice lookup with quick join.
+`Ctrl+K` quick jump, mouse click selection (if terminal supports it), incoming call notifications, missed-call list, and connected-user talk/mic/spk panel.
 
 # send audio (pipewire/pulseaudio)
 use a virtual microphone and feed it with generated noise or a file:
