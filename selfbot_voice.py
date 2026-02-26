@@ -60,6 +60,8 @@ class VoiceSelfClient(discord.Client):
 
         print(f"Connecting to {guild.name}/{channel.name}...")
         voice = await channel.connect(reconnect=False, self_deaf=False, self_mute=False)
+        if self.args.dave_debug:
+            await self._print_dave_status(voice)
         await self._play_to_voice_client(voice, f"{guild.name}/{channel.name}")
 
     async def _play_dm_audio(self) -> None:
@@ -73,7 +75,29 @@ class VoiceSelfClient(discord.Client):
 
         print(f"Connecting to DM call with {user} (ring={self.args.ring})...")
         voice = await dm.connect(reconnect=False, ring=self.args.ring)
+        if self.args.dave_debug:
+            await self._print_dave_status(voice)
         await self._play_to_voice_client(voice, f"DM:{user}")
+
+    async def _print_dave_status(self, voice: discord.VoiceClient) -> None:
+        await asyncio.sleep(2.0)
+        conn = getattr(voice, "_connection", None)
+        if conn is None:
+            print("DAVE: no voice connection internals available")
+            return
+        max_proto = getattr(conn, "max_dave_protocol_version", None)
+        active_proto = getattr(conn, "dave_protocol_version", None)
+        can_encrypt = getattr(conn, "can_encrypt", None)
+        session = getattr(conn, "dave_session", None)
+        privacy_code = getattr(voice, "voice_privacy_code", None)
+        print(
+            "DAVE status:",
+            f"max_protocol={max_proto}",
+            f"active_protocol={active_proto}",
+            f"can_encrypt={can_encrypt}",
+            f"session={'yes' if session else 'no'}",
+            f"privacy_code={privacy_code}",
+        )
 
     def _make_audio_source(self, ffmpeg: str) -> discord.AudioSource:
         if self.args.mode == "file":
@@ -161,6 +185,7 @@ def parse_args() -> argparse.Namespace:
     play.add_argument("--loop", action="store_true", help="Loop file playback")
     play.add_argument("--noise-amp", type=float, default=0.08, help="Noise amplitude (0.0-1.0)")
     play.add_argument("--ffmpeg-path", default=None, help="Path to ffmpeg binary")
+    play.add_argument("--dave-debug", action="store_true", help="Print DAVE negotiation status after connect")
 
     dm_play = sub.add_parser("dm-play", help="Start/join DM call and play audio")
     dm_play.add_argument("--user-id", type=int, required=False, help="Target user id for DM call")
@@ -170,6 +195,7 @@ def parse_args() -> argparse.Namespace:
     dm_play.add_argument("--loop", action="store_true", help="Loop file playback")
     dm_play.add_argument("--noise-amp", type=float, default=0.08, help="Noise amplitude (0.0-1.0)")
     dm_play.add_argument("--ffmpeg-path", default=None, help="Path to ffmpeg binary")
+    dm_play.add_argument("--dave-debug", action="store_true", help="Print DAVE negotiation status after connect")
 
     args = parser.parse_args()
     cfg = load_local_config(args.config)

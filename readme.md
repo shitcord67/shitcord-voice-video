@@ -30,6 +30,9 @@ play in a dm call:
 ring user when starting dm call:
 `python selfbot_voice.py dm-play --user-id <user_id> --ring --mode noise`
 
+print DAVE negotiation status:
+`python selfbot_voice.py play --mode file --file ./rickroll.ogg --dave-debug`
+
 # send audio (pipewire/pulseaudio)
 use a virtual microphone and feed it with generated noise or a file:
 
