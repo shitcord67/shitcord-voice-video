@@ -604,6 +604,7 @@ class VoiceSelfClient(discord.Client):
         preview_callback: Optional[Callable[[int], None]] = None,
         key_actions: Optional[dict[int, Callable[[int], None]]] = None,
         allow_ctrl_k: bool = False,
+        refresh_ms: int = 500,
     ) -> int:
         idx = 0
         query = ""
@@ -654,7 +655,10 @@ class VoiceSelfClient(discord.Client):
                 for row, line in enumerate(call_lines, start=end_row + 1):
                     self._safe_addstr(stdscr, row, 0, line)
             stdscr.refresh()
+            stdscr.timeout(max(50, int(refresh_ms)))
             ch = stdscr.getch()
+            if ch == -1:
+                continue
             if ch in (curses.KEY_UP, ord("k")):
                 if filtered:
                     idx = (idx - 1) % len(filtered)
@@ -712,6 +716,7 @@ class VoiceSelfClient(discord.Client):
             return
 
     def _curses_prompt(self, stdscr, label: str) -> str:
+        stdscr.timeout(-1)
         curses.echo()
         stdscr.clear()
         self._safe_addstr(stdscr, 0, 0, f"{label}: ")
@@ -721,6 +726,7 @@ class VoiceSelfClient(discord.Client):
         return data
 
     def _curses_message(self, stdscr, msg: str) -> None:
+        stdscr.timeout(-1)
         stdscr.clear()
         self._safe_addstr(stdscr, 0, 0, msg)
         self._safe_addstr(stdscr, 2, 0, "Press any key...")
