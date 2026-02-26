@@ -45,6 +45,9 @@ once connected in TUI, use `session>` commands without restarting:
 curses full-screen TUI:
 `python selfbot_voice.py ctui --dave-debug --dave-wait-timeout 20`
 
+ctui features:
+type to search in lists (fuzzy in-order; prefix matches ranked first), press `p` in DM/Guild lists for SIXEL preview (run with `--sixel`, requires `chafa`).
+
 # send audio (pipewire/pulseaudio)
 use a virtual microphone and feed it with generated noise or a file:
 

@@ -7,7 +7,10 @@ import os
 import shutil
 import subprocess
 import sys
-from typing import Optional
+import tempfile
+import urllib.request
+from datetime import datetime
+from typing import Callable, Optional
 
 import discord
 
@@ -27,6 +30,7 @@ class VoiceSelfClient(discord.Client):
         self.args = args
         self._done = asyncio.Event()
         self._last_dave_status = "DAVE: not checked"
+        self._debug_lines: list[str] = []
 
     async def on_ready(self):
         try:
@@ -166,7 +170,12 @@ class VoiceSelfClient(discord.Client):
                             (f"{ch.recipient} ({ch.recipient.id})" if ch.recipient else f"unknown ({ch.id})")
                             for ch in dm_channels
                         ]
-                        pick = self._curses_menu(stdscr, "Select DM", labels + ["Back"])
+                        pick = self._curses_menu(
+                            stdscr,
+                            "Select DM (type to search, p=preview avatar)",
+                            labels + ["Back"],
+                            preview_callback=lambda i: self._ctui_preview_dm(stdscr, dm_channels[i]),
+                        )
                         if pick < len(dm_channels):
                             chosen = dm_channels[pick]
                             uid = chosen.recipient.id if chosen.recipient else None
@@ -194,7 +203,12 @@ class VoiceSelfClient(discord.Client):
                         if not guilds:
                             self._curses_message(stdscr, "No guilds found.")
                             continue
-                        gpick = self._curses_menu(stdscr, "Select Guild", [f"{g.name} ({g.id})" for g in guilds] + ["Back"])
+                        gpick = self._curses_menu(
+                            stdscr,
+                            "Select Guild (type to search, p=preview icon)",
+                            [f"{g.name} ({g.id})" for g in guilds] + ["Back"],
+                            preview_callback=lambda i: self._ctui_preview_guild(stdscr, guilds[i]),
+                        )
                         if gpick < len(guilds):
                             guild = guilds[gpick]
                             chans = sorted(guild.voice_channels, key=lambda cc: cc.position)
@@ -224,10 +238,12 @@ class VoiceSelfClient(discord.Client):
                         "Restart / Apply audio mode",
                         "Audio settings",
                         "Show DAVE status",
+                        "Show debug log",
                         "Switch target (disconnect)",
                         "Disconnect",
                         "Quit",
                     ],
+                    voice=voice,
                 )
                 if choice == 0:
                     try:
@@ -243,7 +259,9 @@ class VoiceSelfClient(discord.Client):
                         self._curses_message(stdscr, self._last_dave_status)
                     except Exception as e:
                         self._curses_message(stdscr, f"Error: {e}")
-                elif choice in (3, 4):
+                elif choice == 3:
+                    self._curses_show_debug_log(stdscr)
+                elif choice in (4, 5):
                     try:
                         run(self._disconnect_voice(voice))
                     except Exception:
@@ -309,27 +327,54 @@ class VoiceSelfClient(discord.Client):
         if self.args.mode == "mic" and self.args.pulse_source:
             self._set_default_pulse_device("source", self.args.pulse_source)
 
-    def _curses_menu(self, stdscr, title: str, items: list[str]) -> int:
+    def _curses_menu(
+        self,
+        stdscr,
+        title: str,
+        items: list[str],
+        voice: Optional[discord.VoiceClient] = None,
+        preview_callback: Optional[Callable[[int], None]] = None,
+    ) -> int:
         idx = 0
+        query = ""
         while True:
+            filtered = self._filter_menu_items(items, query)
+            if filtered:
+                idx = max(0, min(idx, len(filtered) - 1))
+            else:
+                idx = 0
             stdscr.clear()
             stdscr.addstr(0, 0, title)
             if title.startswith("Connected:"):
-                self._curses_add_wrapped(stdscr, 1, 0, self._last_dave_status)
-                base = 3
+                status = self._collect_voice_status(voice)
+                self._curses_add_wrapped(stdscr, 1, 0, status)
+                self._curses_add_wrapped(stdscr, 2, 0, self._last_dave_status)
+                base = 5
             else:
-                base = 2
-            for i, item in enumerate(items):
+                base = 3
+            stdscr.addstr(base - 1, 0, f"Search: {query}")
+            render_items = [items[i] for i in filtered] if filtered else ["(no results)"]
+            for i, item in enumerate(render_items):
                 prefix = "> " if i == idx else "  "
                 stdscr.addstr(base + i, 0, f"{prefix}{item}")
             stdscr.refresh()
             ch = stdscr.getch()
             if ch in (curses.KEY_UP, ord("k")):
-                idx = (idx - 1) % len(items)
+                if filtered:
+                    idx = (idx - 1) % len(filtered)
             elif ch in (curses.KEY_DOWN, ord("j")):
-                idx = (idx + 1) % len(items)
+                if filtered:
+                    idx = (idx + 1) % len(filtered)
+            elif ch in (curses.KEY_BACKSPACE, 127, 8):
+                query = query[:-1]
+            elif ch in (ord("p"), ord("P")):
+                if preview_callback and filtered:
+                    preview_callback(filtered[idx])
             elif ch in (10, 13, curses.KEY_ENTER):
-                return idx
+                if filtered:
+                    return filtered[idx]
+            elif 32 <= ch <= 126:
+                query += chr(ch)
 
     def _curses_add_wrapped(self, stdscr, y: int, x: int, text: str) -> None:
         max_y, max_x = stdscr.getmaxyx()
@@ -357,6 +402,116 @@ class VoiceSelfClient(discord.Client):
         stdscr.addstr(2, 0, "Press any key...")
         stdscr.refresh()
         stdscr.getch()
+
+    def _filter_menu_items(self, items: list[str], query: str) -> list[int]:
+        if not query:
+            return list(range(len(items)))
+        q = query.lower()
+        candidates: list[tuple[int, str]] = []
+        for i, item in enumerate(items):
+            v = item.lower()
+            if self._fuzzy_in_order(v, q):
+                candidates.append((i, v))
+        candidates.sort(key=lambda x: (0 if x[1].startswith(q) else 1, x[1]))
+        return [i for i, _ in candidates]
+
+    def _fuzzy_in_order(self, haystack: str, needle: str) -> bool:
+        it = iter(haystack)
+        return all(ch in it for ch in needle)
+
+    def _ctui_preview_dm(self, stdscr, dm: discord.DMChannel) -> None:
+        recipient = dm.recipient
+        if recipient is None:
+            self._curses_message(stdscr, "No recipient/avatar for this DM.")
+            return
+        url = str(recipient.display_avatar.url)
+        self._show_sixel_from_url(stdscr, url, f"DM Avatar: {recipient}")
+
+    def _ctui_preview_guild(self, stdscr, guild: discord.Guild) -> None:
+        if guild.icon is None:
+            self._curses_message(stdscr, f"Guild '{guild.name}' has no icon.")
+            return
+        self._show_sixel_from_url(stdscr, str(guild.icon.url), f"Guild Icon: {guild.name}")
+
+    def _show_sixel_from_url(self, stdscr, url: str, title: str) -> None:
+        if not self.args.sixel:
+            self._curses_message(stdscr, "SIXEL preview is disabled. Run ctui with --sixel.")
+            return
+        if not self._supports_sixel():
+            self._curses_message(stdscr, "Terminal SIXEL support not detected.")
+            return
+        if shutil.which("chafa") is None:
+            self._curses_message(stdscr, "chafa not found. Install chafa for SIXEL image preview.")
+            return
+        tmp_path = None
+        try:
+            with urllib.request.urlopen(url, timeout=10) as resp:
+                data = resp.read()
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".img") as tmp:
+                tmp.write(data)
+                tmp_path = tmp.name
+            curses.endwin()
+            print(f"\n{title}\n")
+            subprocess.run(["chafa", "-f", "sixel", tmp_path], check=False)
+            input("\nPress Enter to return to CTUI...")
+        except Exception as e:
+            self._curses_message(stdscr, f"SIXEL preview failed: {e}")
+        finally:
+            try:
+                if tmp_path:
+                    os.unlink(tmp_path)
+            except Exception:
+                pass
+
+    def _supports_sixel(self) -> bool:
+        term = (os.environ.get("TERM") or "").lower()
+        return "sixel" in term or "xterm" in term or "mlterm" in term or "wezterm" in term
+
+    def _curses_show_debug_log(self, stdscr) -> None:
+        lines = self._debug_lines[-100:] if self._debug_lines else ["(no debug lines yet)"]
+        pos = max(0, len(lines) - 1)
+        while True:
+            stdscr.clear()
+            stdscr.addstr(0, 0, "Debug log (j/k scroll, q exit)")
+            max_y, max_x = stdscr.getmaxyx()
+            view_h = max(1, max_y - 2)
+            start = max(0, min(pos - view_h + 1, len(lines) - view_h))
+            for row, line in enumerate(lines[start : start + view_h], start=1):
+                stdscr.addstr(row, 0, line[: max_x - 1])
+            stdscr.refresh()
+            ch = stdscr.getch()
+            if ch in (ord("q"), 27):
+                return
+            if ch in (curses.KEY_UP, ord("k")):
+                pos = max(0, pos - 1)
+            elif ch in (curses.KEY_DOWN, ord("j")):
+                pos = min(len(lines) - 1, pos + 1)
+
+    def _collect_voice_status(self, voice: Optional[discord.VoiceClient]) -> str:
+        if voice is None:
+            return "Status: disconnected"
+        conn = getattr(voice, "_connection", None)
+        dave_proto = getattr(conn, "dave_protocol_version", None) if conn else None
+        dave_encrypt = getattr(conn, "can_encrypt", None) if conn else None
+        ws = getattr(conn, "ws", None) if conn else None
+        voice_ver = getattr(ws, "voice_version", None) if ws else None
+        rtc_ver = getattr(ws, "rtc_worker_version", None) if ws else None
+        return (
+            "Status: "
+            f"connected={voice.is_connected()} "
+            f"playing={voice.is_playing()} "
+            f"mode={self.args.mode} "
+            f"dave_protocol={dave_proto} "
+            f"dave_encrypt={dave_encrypt} "
+            f"voice_backend={voice_ver} "
+            f"rtc_worker={rtc_ver}"
+        )
+
+    def _dbg(self, msg: str) -> None:
+        ts = datetime.now().strftime("%H:%M:%S")
+        self._debug_lines.append(f"[{ts}] {msg}")
+        if len(self._debug_lines) > 500:
+            self._debug_lines = self._debug_lines[-500:]
 
     async def _connect_dm_by_user_id(self, user_id: int) -> None:
         voice, label = await self._open_dm_connection_by_id(user_id)
@@ -571,6 +726,7 @@ class VoiceSelfClient(discord.Client):
 
         if self.args.mode == "connect":
             print(f"Connected to {label} (no audio playback).")
+            self._dbg(f"connect-only mode in {label}")
             return
 
         ffmpeg = self.args.ffmpeg_path or shutil.which("ffmpeg")
@@ -580,10 +736,13 @@ class VoiceSelfClient(discord.Client):
         voice.play(source, after=lambda err: print(f"Playback error: {err}") if err else None)
         if self.args.mode == "file":
             print(f"Now playing file (loop={self.args.loop}): {self.args.file}")
+            self._dbg(f"playing file: {self.args.file} loop={self.args.loop}")
         elif self.args.mode == "noise":
             print(f"Now playing noise (amp={self.args.noise_amp})")
+            self._dbg(f"playing noise: amp={self.args.noise_amp}")
         elif self.args.mode == "mic":
             print(f"Now streaming microphone source: {self.args.pulse_source or 'default'}")
+            self._dbg(f"streaming mic: source={self.args.pulse_source or 'default'}")
 
     def _print_session_help(self) -> None:
         print("Commands:")
@@ -725,6 +884,7 @@ class VoiceSelfClient(discord.Client):
         if conn is None:
             self._last_dave_status = "DAVE: no voice connection internals available"
             print(self._last_dave_status)
+            self._dbg(self._last_dave_status)
             return
         max_proto = getattr(conn, "max_dave_protocol_version", None)
         active_proto = getattr(conn, "dave_protocol_version", None)
@@ -740,6 +900,7 @@ class VoiceSelfClient(discord.Client):
             f"privacy_code={privacy_code}"
         )
         print(self._last_dave_status)
+        self._dbg(self._last_dave_status)
 
     def _enforce_dave_or_raise(self, voice: discord.VoiceClient) -> None:
         conn = getattr(voice, "_connection", None)
@@ -887,6 +1048,7 @@ def parse_args() -> argparse.Namespace:
     ctui.add_argument("--pulse-source", default=None, help="Default PulseAudio source")
     ctui.add_argument("--pulse-sink", default=None, help="Default PulseAudio sink")
     ctui.add_argument("--ffmpeg-path", default=None, help="Path to ffmpeg binary")
+    ctui.add_argument("--sixel", action="store_true", help="Enable SIXEL avatar/icon previews with chafa")
     ctui.add_argument("--dave-debug", action="store_true", help="Print DAVE negotiation status after connect")
     ctui.add_argument("--require-dave", action="store_true", help="Abort if DAVE is not active/encrypting")
     ctui.add_argument("--dave-wait-timeout", type=float, default=10.0, help="Seconds to wait for DAVE encryption readiness")
