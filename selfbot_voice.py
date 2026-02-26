@@ -26,6 +26,7 @@ class VoiceSelfClient(discord.Client):
         super().__init__()
         self.args = args
         self._done = asyncio.Event()
+        self._last_dave_status = "DAVE: not checked"
 
     async def on_ready(self):
         try:
@@ -239,7 +240,7 @@ class VoiceSelfClient(discord.Client):
                 elif choice == 2:
                     try:
                         run(self._wait_for_dave_status(voice, timeout=max(0.5, self.args.dave_wait_timeout)))
-                        self._curses_message(stdscr, "DAVE status printed to terminal output.")
+                        self._curses_message(stdscr, self._last_dave_status)
                     except Exception as e:
                         self._curses_message(stdscr, f"Error: {e}")
                 elif choice in (3, 4):
@@ -313,9 +314,14 @@ class VoiceSelfClient(discord.Client):
         while True:
             stdscr.clear()
             stdscr.addstr(0, 0, title)
+            if title.startswith("Connected:"):
+                self._curses_add_wrapped(stdscr, 1, 0, self._last_dave_status)
+                base = 3
+            else:
+                base = 2
             for i, item in enumerate(items):
                 prefix = "> " if i == idx else "  "
-                stdscr.addstr(2 + i, 0, f"{prefix}{item}")
+                stdscr.addstr(base + i, 0, f"{prefix}{item}")
             stdscr.refresh()
             ch = stdscr.getch()
             if ch in (curses.KEY_UP, ord("k")):
@@ -324,6 +330,17 @@ class VoiceSelfClient(discord.Client):
                 idx = (idx + 1) % len(items)
             elif ch in (10, 13, curses.KEY_ENTER):
                 return idx
+
+    def _curses_add_wrapped(self, stdscr, y: int, x: int, text: str) -> None:
+        max_y, max_x = stdscr.getmaxyx()
+        if y >= max_y:
+            return
+        safe = text or ""
+        while safe and y < max_y:
+            chunk = safe[: max_x - x - 1] if max_x - x - 1 > 0 else ""
+            stdscr.addstr(y, x, chunk)
+            safe = safe[len(chunk):]
+            y += 1
 
     def _curses_prompt(self, stdscr, label: str) -> str:
         curses.echo()
@@ -706,21 +723,23 @@ class VoiceSelfClient(discord.Client):
 
         conn = getattr(voice, "_connection", None)
         if conn is None:
-            print("DAVE: no voice connection internals available")
+            self._last_dave_status = "DAVE: no voice connection internals available"
+            print(self._last_dave_status)
             return
         max_proto = getattr(conn, "max_dave_protocol_version", None)
         active_proto = getattr(conn, "dave_protocol_version", None)
         can_encrypt = getattr(conn, "can_encrypt", None)
         session = getattr(conn, "dave_session", None)
         privacy_code = getattr(voice, "voice_privacy_code", None)
-        print(
-            "DAVE status:",
-            f"max_protocol={max_proto}",
-            f"active_protocol={active_proto}",
-            f"can_encrypt={can_encrypt}",
-            f"session={'yes' if session else 'no'}",
-            f"privacy_code={privacy_code}",
+        self._last_dave_status = (
+            "DAVE status: "
+            f"max_protocol={max_proto} "
+            f"active_protocol={active_proto} "
+            f"can_encrypt={can_encrypt} "
+            f"session={'yes' if session else 'no'} "
+            f"privacy_code={privacy_code}"
         )
+        print(self._last_dave_status)
 
     def _enforce_dave_or_raise(self, voice: discord.VoiceClient) -> None:
         conn = getattr(voice, "_connection", None)
