@@ -38,6 +38,17 @@ class VoiceSelfClient(discord.Client):
         self._active_notice: Optional[dict[str, Any]] = None
         self._call_history: list[dict[str, Any]] = []
         self._active_call_records: dict[int, int] = {}
+        self._video_probe_counts: dict[str, int] = {
+            "voice_ws_op_2_ready": 0,
+            "voice_ws_op_11_clients_connect": 0,
+            "voice_ws_op_12_video": 0,
+            "voice_ws_op_13_client_disconnect": 0,
+            "voice_state_video_toggles": 0,
+            "voice_state_stream_toggles": 0,
+            "self_video_set_calls": 0,
+            "video_opcode_sent_calls": 0,
+        }
+        self._video_probe_events: list[str] = []
 
     async def on_ready(self):
         try:
@@ -74,17 +85,33 @@ class VoiceSelfClient(discord.Client):
     async def on_voice_state_update(self, member, before, after) -> None:
         try:
             if bool(getattr(before, "self_video", False)) != bool(getattr(after, "self_video", False)):
+                self._video_probe_counts["voice_state_video_toggles"] += 1
                 self._dbg(
                     f"voice_state video: user={member} ({member.id}) "
                     f"{getattr(before, 'self_video', False)} -> {getattr(after, 'self_video', False)}"
                 )
+                self._video_probe_event(
+                    f"voice_state video {member} ({member.id}) "
+                    f"{getattr(before, 'self_video', False)} -> {getattr(after, 'self_video', False)}"
+                )
             if bool(getattr(before, "self_stream", False)) != bool(getattr(after, "self_stream", False)):
+                self._video_probe_counts["voice_state_stream_toggles"] += 1
                 self._dbg(
                     f"voice_state stream: user={member} ({member.id}) "
                     f"{getattr(before, 'self_stream', False)} -> {getattr(after, 'self_stream', False)}"
                 )
+                self._video_probe_event(
+                    f"voice_state stream {member} ({member.id}) "
+                    f"{getattr(before, 'self_stream', False)} -> {getattr(after, 'self_stream', False)}"
+                )
         except Exception as e:
             self._dbg(f"on_voice_state_update hook error: {e!r}")
+
+    def _video_probe_event(self, msg: str) -> None:
+        ts = datetime.now().strftime("%H:%M:%S")
+        self._video_probe_events.append(f"[{ts}] {msg}")
+        if len(self._video_probe_events) > 120:
+            self._video_probe_events = self._video_probe_events[-120:]
 
     def _is_ringing_me(self, call) -> bool:
         me = self.user
@@ -461,6 +488,7 @@ class VoiceSelfClient(discord.Client):
                         "Audio settings",
                         "Toggle self camera flag (exp)",
                         "Send VIDEO opcode (exp)",
+                        "Show video probe status (exp)",
                         "Show DAVE status",
                         "Show debug log",
                         "Show missed calls",
@@ -507,18 +535,20 @@ class VoiceSelfClient(discord.Client):
                     except Exception as e:
                         self._curses_message(stdscr, f"Error: {e}")
                 elif choice == 4:
+                    self._ctui_show_video_probe(stdscr)
+                elif choice == 5:
                     try:
                         run(self._wait_for_dave_status(voice, timeout=max(0.5, self.args.dave_wait_timeout)))
                         self._curses_message(stdscr, self._last_dave_status)
                     except Exception as e:
                         self._curses_message(stdscr, f"Error: {e}")
-                elif choice == 5:
-                    self._curses_show_debug_log(stdscr)
                 elif choice == 6:
-                    self._ctui_show_missed_calls(stdscr)
+                    self._curses_show_debug_log(stdscr)
                 elif choice == 7:
-                    self._ctui_show_call_log(stdscr)
+                    self._ctui_show_missed_calls(stdscr)
                 elif choice == 8:
+                    self._ctui_show_call_log(stdscr)
+                elif choice == 9:
                     try:
                         run(self._disconnect_voice(voice))
                     except Exception:
@@ -528,7 +558,7 @@ class VoiceSelfClient(discord.Client):
                     conn = self._ctui_quick_dm_call(stdscr, loop)
                     if conn is not None:
                         voice, label = conn
-                elif choice == 9:
+                elif choice == 10:
                     try:
                         run(self._disconnect_voice(voice))
                     except Exception:
@@ -538,7 +568,7 @@ class VoiceSelfClient(discord.Client):
                     conn = self._ctui_quick_jump(stdscr, loop)
                     if conn is not None:
                         voice, label = conn
-                elif choice in (10, 11):
+                elif choice in (11, 12):
                     try:
                         run(self._disconnect_voice(voice))
                     except Exception:
@@ -893,6 +923,26 @@ class VoiceSelfClient(discord.Client):
         ]
         self._curses_menu(stdscr, "Call history (search enabled)", labels + ["Back"])
 
+    def _ctui_show_video_probe(self, stdscr) -> None:
+        lines = [
+            "Video Probe Status",
+            "",
+            "Counters:",
+            f"  voice_ws op=2 (READY): {self._video_probe_counts.get('voice_ws_op_2_ready', 0)}",
+            f"  voice_ws op=11 (CLIENTS_CONNECT): {self._video_probe_counts.get('voice_ws_op_11_clients_connect', 0)}",
+            f"  voice_ws op=12 (VIDEO): {self._video_probe_counts.get('voice_ws_op_12_video', 0)}",
+            f"  voice_ws op=13 (CLIENT_DISCONNECT): {self._video_probe_counts.get('voice_ws_op_13_client_disconnect', 0)}",
+            f"  voice_state video toggles: {self._video_probe_counts.get('voice_state_video_toggles', 0)}",
+            f"  voice_state stream toggles: {self._video_probe_counts.get('voice_state_stream_toggles', 0)}",
+            f"  self_video set calls: {self._video_probe_counts.get('self_video_set_calls', 0)}",
+            f"  VIDEO opcode sent calls: {self._video_probe_counts.get('video_opcode_sent_calls', 0)}",
+            "",
+            "Recent probe events:",
+        ]
+        tail = self._video_probe_events[-20:] if self._video_probe_events else ["(none yet)"]
+        lines.extend([f"  {x}" for x in tail])
+        self._curses_message(stdscr, "\n".join(lines))
+
     def _collect_voice_status(self, voice: Optional[discord.VoiceClient]) -> str:
         if voice is None:
             return "Status: disconnected"
@@ -1177,8 +1227,17 @@ class VoiceSelfClient(discord.Client):
         try:
             op = msg.get("op")
             data = msg.get("d") or {}
+            if op == 2:
+                self._video_probe_counts["voice_ws_op_2_ready"] += 1
+            elif op == 11:
+                self._video_probe_counts["voice_ws_op_11_clients_connect"] += 1
+            elif op == 12:
+                self._video_probe_counts["voice_ws_op_12_video"] += 1
+            elif op == 13:
+                self._video_probe_counts["voice_ws_op_13_client_disconnect"] += 1
             if op in (2, 11, 12, 13):
                 self._dbg(f"voice ws op={op} data={data}")
+                self._video_probe_event(f"voice_ws op={op} data={data}")
             if op == 5:  # SPEAKING
                 raw_uid = data.get("user_id")
                 if raw_uid is None:
@@ -1388,14 +1447,18 @@ class VoiceSelfClient(discord.Client):
             self_video=bool(enabled),
         )
         self.args.exp_self_video = bool(enabled)
+        self._video_probe_counts["self_video_set_calls"] += 1
         self._dbg(f"exp self_video set to {enabled} on channel={channel_id}")
+        self._video_probe_event(f"set self_video={enabled} channel={channel_id}")
 
     async def _exp_send_video_opcode(self, voice: discord.VoiceClient) -> None:
         ws = getattr(voice, "ws", None)
         if ws is None:
             raise RuntimeError("Voice websocket unavailable for VIDEO opcode.")
         await ws.client_connect()
+        self._video_probe_counts["video_opcode_sent_calls"] += 1
         self._dbg("exp VIDEO opcode sent via voice websocket")
+        self._video_probe_event("sent VOICE VIDEO opcode")
 
     async def _hold_connection(self, voice: discord.VoiceClient, label: str) -> None:
         print(f"Connected to {label}. Press Ctrl+C to disconnect.")
