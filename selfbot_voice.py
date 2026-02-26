@@ -150,7 +150,11 @@ class VoiceSelfClient(discord.Client):
             stdscr.clear()
             stdscr.addstr(0, 0, f"discord.py-self ctui  user={self.user} ({self.user.id})")
             if voice is None:
-                choice = self._curses_menu(stdscr, "Main", ["Connect DM", "Connect Guild", "Audio Settings", "Quit"])
+                choice = self._curses_menu(
+                    stdscr,
+                    "Main",
+                    ["Connect DM", "Connect Guild", "Find User in Voice", "Audio Settings", "Quit"],
+                )
                 if choice == 0:
                     target = self._curses_menu(stdscr, "DM", ["Input ID", "List", f"Toggle Ring ({'ON' if self.args.ring else 'OFF'})", "Back"])
                     if target == 0:
@@ -203,10 +207,17 @@ class VoiceSelfClient(discord.Client):
                         if not guilds:
                             self._curses_message(stdscr, "No guilds found.")
                             continue
+                        guild_labels = []
+                        for g in guilds:
+                            voice_users = sum(len(vc.members) for vc in g.voice_channels)
+                            active_channels = sum(1 for vc in g.voice_channels if len(vc.members) > 0)
+                            guild_labels.append(
+                                f"{g.name} ({g.id}) vc_users={voice_users} active_vc={active_channels}"
+                            )
                         gpick = self._curses_menu(
                             stdscr,
                             "Select Guild (type to search, p=preview icon)",
-                            [f"{g.name} ({g.id})" for g in guilds] + ["Back"],
+                            guild_labels + ["Back"],
                             preview_callback=lambda i: self._ctui_preview_guild(stdscr, guilds[i]),
                         )
                         if gpick < len(guilds):
@@ -217,8 +228,11 @@ class VoiceSelfClient(discord.Client):
                                 continue
                             cpick = self._curses_menu(
                                 stdscr,
-                                "Select Voice Channel",
+                                "Select Voice Channel (u=list users)",
                                 [f"{ch.name} ({ch.id}) members={len(ch.members)}" for ch in chans] + ["Back"],
+                                key_actions={
+                                    ord("u"): lambda i: self._ctui_show_voice_members(stdscr, chans[i]) if i < len(chans) else None
+                                },
                             )
                             if cpick < len(chans):
                                 ch = chans[cpick]
@@ -227,6 +241,10 @@ class VoiceSelfClient(discord.Client):
                                 except Exception as e:
                                     self._curses_message(stdscr, f"Error: {e}")
                 elif choice == 2:
+                    conn = self._ctui_find_user_in_voice(stdscr, loop)
+                    if conn is not None:
+                        voice, label = conn
+                elif choice == 3:
                     self._ctui_audio_settings(stdscr)
                 else:
                     return
@@ -334,6 +352,7 @@ class VoiceSelfClient(discord.Client):
         items: list[str],
         voice: Optional[discord.VoiceClient] = None,
         preview_callback: Optional[Callable[[int], None]] = None,
+        key_actions: Optional[dict[int, Callable[[int], None]]] = None,
     ) -> int:
         idx = 0
         query = ""
@@ -370,6 +389,9 @@ class VoiceSelfClient(discord.Client):
             elif ch in (ord("p"), ord("P")):
                 if preview_callback and filtered:
                     preview_callback(filtered[idx])
+            elif key_actions and ch in key_actions:
+                if filtered:
+                    key_actions[ch](filtered[idx])
             elif ch in (10, 13, curses.KEY_ENTER):
                 if filtered:
                     return filtered[idx]
@@ -432,6 +454,46 @@ class VoiceSelfClient(discord.Client):
             self._curses_message(stdscr, f"Guild '{guild.name}' has no icon.")
             return
         self._show_sixel_from_url(stdscr, str(guild.icon.url), f"Guild Icon: {guild.name}")
+
+    def _ctui_show_voice_members(self, stdscr, channel: discord.VoiceChannel) -> None:
+        members = sorted(channel.members, key=lambda m: str(m).lower())
+        if not members:
+            self._curses_message(stdscr, f"No users in {channel.name}.")
+            return
+        labels = [f"{m} ({m.id})" for m in members]
+        self._curses_menu(stdscr, f"Users in {channel.name} (search enabled)", labels + ["Back"])
+
+    def _ctui_find_user_in_voice(self, stdscr, loop: asyncio.AbstractEventLoop):
+        entries = []
+        for guild in sorted(self.guilds, key=lambda g: g.name.lower()):
+            for ch in sorted(guild.voice_channels, key=lambda c: c.position):
+                for m in ch.members:
+                    entries.append((m, guild, ch))
+        if not entries:
+            self._curses_message(stdscr, "No users currently in voice channels.")
+            return None
+
+        labels = [f"{m} ({m.id}) -> {g.name}/{ch.name}" for m, g, ch in entries]
+        idx = self._curses_menu(stdscr, "Find user in voice (type name/id)", labels + ["Back"])
+        if idx >= len(entries):
+            return None
+
+        member, guild, channel = entries[idx]
+        action = self._curses_menu(
+            stdscr,
+            f"{member} in {guild.name}/{channel.name}",
+            ["Join this voice channel", "Back"],
+        )
+        if action == 0:
+            try:
+                voice, label = asyncio.run_coroutine_threadsafe(
+                    self._open_guild_connection(guild.id, channel.id), loop
+                ).result()
+            except Exception as e:
+                self._curses_message(stdscr, f"Error: {e}")
+                return None
+            return (voice, label)
+        return None
 
     def _show_sixel_from_url(self, stdscr, url: str, title: str) -> None:
         if not self.args.sixel:

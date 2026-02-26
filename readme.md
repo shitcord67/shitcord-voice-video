@@ -47,6 +47,9 @@ curses full-screen TUI:
 
 ctui features:
 type to search in lists (fuzzy in-order; prefix matches ranked first), press `p` in DM/Guild lists for SIXEL preview (run with `--sixel`, requires `chafa`).
+guild list shows `vc_users` + `active_vc`.
+in voice-channel lists press `u` to open a searchable member list.
+main menu has `Find User in Voice` for global searchable user-in-voice lookup with quick join.
 
 # send audio (pipewire/pulseaudio)
 use a virtual microphone and feed it with generated noise or a file:
