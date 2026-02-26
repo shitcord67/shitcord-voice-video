@@ -1229,6 +1229,22 @@ def parse_args() -> argparse.Namespace:
     cfg = load_local_config(args.config)
     args.config_token = cfg.get("token")
 
+    # Ensure interactive commands always have a full audio state.
+    # ctui/tui menus mutate these, but status rendering may read them first.
+    if args.command in ("tui", "ctui"):
+        if not hasattr(args, "mode"):
+            args.mode = "connect"
+        if not hasattr(args, "loop"):
+            args.loop = False
+        if not hasattr(args, "noise_amp"):
+            args.noise_amp = 0.08
+        if not hasattr(args, "file"):
+            args.file = "rickroll.ogg"
+        if not hasattr(args, "pulse_source"):
+            args.pulse_source = None
+        if not hasattr(args, "pulse_sink"):
+            args.pulse_sink = None
+
     if args.command == "play":
         if args.guild_id is None:
             args.guild_id = cfg.get("guild_id")
