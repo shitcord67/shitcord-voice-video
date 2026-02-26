@@ -342,6 +342,7 @@ class VoiceSelfClient(discord.Client):
                     stdscr,
                     "Main",
                     [
+                        "Shortcuts / Help",
                         "Join/Accept DM Call",
                         "Connect DM",
                         "Connect Guild",
@@ -360,10 +361,12 @@ class VoiceSelfClient(discord.Client):
                         voice, label = conn
                     continue
                 if choice == 0:
+                    self._ctui_show_shortcuts(stdscr, connected=False)
+                elif choice == 1:
                     conn = self._ctui_quick_dm_call(stdscr, loop)
                     if conn is not None:
                         voice, label = conn
-                elif choice == 1:
+                elif choice == 2:
                     target = self._curses_menu(stdscr, "DM", ["Input ID", "List", f"Toggle Ring ({'ON' if self.args.ring else 'OFF'})", "Back"])
                     if target == 0:
                         raw = self._curses_prompt(stdscr, "User ID")
@@ -404,7 +407,7 @@ class VoiceSelfClient(discord.Client):
                                     self._curses_message(stdscr, f"Error: {e}")
                     elif target == 2:
                         self.args.ring = not self.args.ring
-                elif choice == 2:
+                elif choice == 3:
                     target = self._curses_menu(stdscr, "Guild", ["Input IDs", "List", "Back"])
                     if target == 0:
                         g = self._curses_prompt(stdscr, "Guild ID")
@@ -452,21 +455,21 @@ class VoiceSelfClient(discord.Client):
                                     voice, label = run(self._open_guild_connection(guild.id, ch.id))
                                 except Exception as e:
                                     self._curses_message(stdscr, f"Error: {e}")
-                elif choice == 3:
+                elif choice == 4:
                     conn = self._ctui_connect_recent(stdscr, loop)
                     if conn is not None:
                         voice, label = conn
-                elif choice == 4:
+                elif choice == 5:
                     conn = self._ctui_find_user_in_voice(stdscr, loop)
                     if conn is not None:
                         voice, label = conn
-                elif choice == 5:
+                elif choice == 6:
                     conn = self._ctui_quick_jump(stdscr, loop)
                     if conn is not None:
                         voice, label = conn
-                elif choice == 6:
-                    self._ctui_audio_settings(stdscr)
                 elif choice == 7:
+                    self._ctui_audio_settings(stdscr)
+                elif choice == 8:
                     self._ctui_show_missed_calls(stdscr)
                 else:
                     return
@@ -475,6 +478,7 @@ class VoiceSelfClient(discord.Client):
                     stdscr,
                     f"Connected: {label}",
                     [
+                        "Shortcuts / Help",
                         "Restart / Apply audio mode",
                         "Audio settings",
                         "Show DAVE status",
@@ -502,26 +506,28 @@ class VoiceSelfClient(discord.Client):
                         voice, label = conn
                     continue
                 if choice == 0:
+                    self._ctui_show_shortcuts(stdscr, connected=True)
+                elif choice == 1:
                     try:
                         run(self._restart_playback(voice, label))
                         self._curses_message(stdscr, "Playback restarted/applied.")
                     except Exception as e:
                         self._curses_message(stdscr, f"Error: {e}")
-                elif choice == 1:
-                    self._ctui_audio_settings(stdscr)
                 elif choice == 2:
+                    self._ctui_audio_settings(stdscr)
+                elif choice == 3:
                     try:
                         run(self._wait_for_dave_status(voice, timeout=max(0.5, self.args.dave_wait_timeout)))
                         self._curses_message(stdscr, self._last_dave_status)
                     except Exception as e:
                         self._curses_message(stdscr, f"Error: {e}")
-                elif choice == 3:
-                    self._curses_show_debug_log(stdscr)
                 elif choice == 4:
-                    self._ctui_show_missed_calls(stdscr)
+                    self._curses_show_debug_log(stdscr)
                 elif choice == 5:
-                    self._ctui_show_call_log(stdscr)
+                    self._ctui_show_missed_calls(stdscr)
                 elif choice == 6:
+                    self._ctui_show_call_log(stdscr)
+                elif choice == 7:
                     try:
                         run(self._disconnect_voice(voice))
                     except Exception:
@@ -531,7 +537,7 @@ class VoiceSelfClient(discord.Client):
                     conn = self._ctui_quick_dm_call(stdscr, loop)
                     if conn is not None:
                         voice, label = conn
-                elif choice == 7:
+                elif choice == 8:
                     try:
                         run(self._disconnect_voice(voice))
                     except Exception:
@@ -541,7 +547,7 @@ class VoiceSelfClient(discord.Client):
                     conn = self._ctui_quick_jump(stdscr, loop)
                     if conn is not None:
                         voice, label = conn
-                elif choice in (8, 9):
+                elif choice in (9, 10):
                     try:
                         run(self._disconnect_voice(voice))
                     except Exception:
@@ -554,6 +560,36 @@ class VoiceSelfClient(discord.Client):
                     except Exception:
                         pass
                     return
+
+    def _ctui_show_shortcuts(self, stdscr, *, connected: bool) -> None:
+        lines = [
+            "CTUI Shortcuts",
+            "",
+            "Menu navigation:",
+            "  Up/Down or j/k: move selection",
+            "  Enter: select",
+            "  Type text: search/filter list",
+            "  Backspace: clear one search character",
+            "  Ctrl+K: quick jump popup",
+            "  Mouse click: select row (if terminal supports mouse)",
+            "",
+            "Extra keys in some lists:",
+            "  p: preview avatar/icon (requires --sixel + chafa)",
+            "  u: show users in selected voice channel",
+            "",
+        ]
+        if connected:
+            lines += [
+                "Connected view:",
+                "  Restart/Apply audio mode to reapply file/noise/mic settings",
+                "  Switch target disconnects first, then opens target picker",
+            ]
+        else:
+            lines += [
+                "Main view:",
+                "  Join/Accept DM Call prioritizes incoming rings first",
+            ]
+        self._curses_message(stdscr, "\n".join(lines))
 
     def _ctui_audio_settings(self, stdscr) -> None:
         mode = self._curses_menu(stdscr, "Audio mode", ["File", "Noise", "Microphone", "Connect only", "Back"])
