@@ -1,3 +1,16 @@
+# quick start
+use the launcher script (auto-creates/uses `.venv`, installs requirements if needed):
+`./start-selfbot.sh`
+
+quick targets:
+`./start-selfbot.sh --dm <user_id> --mode connect`
+`./start-selfbot.sh --guild <guild_id> --channel <channel_id> --mode connect`
+`./start-selfbot.sh --list`
+
+token handling:
+- reads token from `.voice-config.json` or `DISCORD_USER_TOKEN` by default
+- optional override: `./start-selfbot.sh --token <token>`
+
 # python selfbot prototype (discord.py-self)
 this is a separate path from the node native module.
 

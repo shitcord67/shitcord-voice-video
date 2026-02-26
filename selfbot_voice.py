@@ -217,7 +217,10 @@ class VoiceSelfClient(discord.Client):
             await self._wait_for_dave_status(voice, timeout=self.args.dave_wait_timeout)
         if self.args.require_dave:
             self._enforce_dave_or_raise(voice)
-        await self._play_to_voice_client(voice, f"{guild.name}/{channel.name}")
+        if self.args.mode == "connect":
+            await self._hold_connection(voice, f"{guild.name}/{channel.name}")
+        else:
+            await self._play_to_voice_client(voice, f"{guild.name}/{channel.name}")
 
     async def _play_dm_audio(self) -> None:
         user = self.get_user(self.args.user_id) or await self.fetch_user(self.args.user_id)
@@ -234,7 +237,10 @@ class VoiceSelfClient(discord.Client):
             await self._wait_for_dave_status(voice, timeout=self.args.dave_wait_timeout)
         if self.args.require_dave:
             self._enforce_dave_or_raise(voice)
-        await self._play_to_voice_client(voice, f"DM:{user}")
+        if self.args.mode == "connect":
+            await self._hold_connection(voice, f"DM:{user}")
+        else:
+            await self._play_to_voice_client(voice, f"DM:{user}")
 
     async def _run_tui(self) -> None:
         print(f"Logged in as: {self.user} ({self.user.id})")
@@ -1772,7 +1778,7 @@ def parse_args() -> argparse.Namespace:
     play = sub.add_parser("play", help="Join voice channel and play audio")
     play.add_argument("--guild-id", type=int, required=False)
     play.add_argument("--channel-id", type=int, required=False)
-    play.add_argument("--mode", choices=["file", "noise"], default="file")
+    play.add_argument("--mode", choices=["file", "noise", "connect"], default="file")
     play.add_argument("--file", default="rickroll.ogg", help="Audio file path when --mode file")
     play.add_argument("--loop", action="store_true", help="Loop file playback")
     play.add_argument("--noise-amp", type=float, default=0.08, help="Noise amplitude (0.0-1.0)")
@@ -1786,7 +1792,7 @@ def parse_args() -> argparse.Namespace:
     dm_play = sub.add_parser("dm-play", help="Start/join DM call and play audio")
     dm_play.add_argument("--user-id", type=int, required=False, help="Target user id for DM call")
     dm_play.add_argument("--ring", action="store_true", help="Ring user when starting DM call")
-    dm_play.add_argument("--mode", choices=["file", "noise", "mic"], default="file")
+    dm_play.add_argument("--mode", choices=["file", "noise", "mic", "connect"], default="file")
     dm_play.add_argument("--file", default="rickroll.ogg", help="Audio file path when --mode file")
     dm_play.add_argument("--loop", action="store_true", help="Loop file playback")
     dm_play.add_argument("--noise-amp", type=float, default=0.08, help="Noise amplitude (0.0-1.0)")
