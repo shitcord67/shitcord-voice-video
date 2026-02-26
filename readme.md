@@ -53,6 +53,10 @@ experimental video branch notes:
 while connected in ctui, use `Toggle self camera flag (exp)` to flip self camera flag live.
 while connected in ctui, use `Send VIDEO opcode (exp)` for explicit signaling tests.
 optional: `Toggle VIDEO opcode loop (exp)` to send repeated VIDEO opcodes.
+experimental transport probe:
+- `Send fake video RTP packet (exp)` sends one encrypted RTP-shaped probe packet
+- `Toggle fake video RTP loop (exp)` sends repeated fake video RTP probes
+- tune with `--exp-fake-video-interval`, `--exp-fake-video-pt`, `--exp-fake-video-payload`
 while connected in ctui, use `Show video probe status (exp)` to inspect counters/events.
 quick launcher for this branch:
 `./start-video-exp.sh` (writes logs to `./video-exp.log`, override with `VIDEO_EXP_LOG=...`).

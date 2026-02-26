@@ -5,6 +5,7 @@ import curses
 import json
 import os
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -47,9 +48,14 @@ class VoiceSelfClient(discord.Client):
             "voice_state_stream_toggles": 0,
             "self_video_set_calls": 0,
             "video_opcode_sent_calls": 0,
+            "fake_video_packet_sent_calls": 0,
         }
         self._video_probe_events: list[str] = []
         self._video_loop_task: Optional[asyncio.Task] = None
+        self._fake_video_loop_task: Optional[asyncio.Task] = None
+        self._video_seq: Optional[int] = None
+        self._video_ts: Optional[int] = None
+        self._video_ssrc: Optional[int] = None
 
     async def on_ready(self):
         try:
@@ -490,6 +496,8 @@ class VoiceSelfClient(discord.Client):
                         "Toggle self camera flag (exp)",
                         "Send VIDEO opcode (exp)",
                         "Toggle VIDEO opcode loop (exp)",
+                        "Send fake video RTP packet (exp)",
+                        "Toggle fake video RTP loop (exp)",
                         "Show video probe status (exp)",
                         "Show DAVE status",
                         "Show debug log",
@@ -543,20 +551,32 @@ class VoiceSelfClient(discord.Client):
                     except Exception as e:
                         self._curses_message(stdscr, f"Error: {e}")
                 elif choice == 5:
-                    self._ctui_show_video_probe(stdscr)
+                    try:
+                        run(self._exp_send_fake_video_packet(voice))
+                        self._curses_message(stdscr, "Sent fake video RTP packet.")
+                    except Exception as e:
+                        self._curses_message(stdscr, f"Error: {e}")
                 elif choice == 6:
+                    try:
+                        enabled = run(self._toggle_fake_video_loop(voice))
+                        self._curses_message(stdscr, f"Fake video RTP loop is now {'ON' if enabled else 'OFF'}.")
+                    except Exception as e:
+                        self._curses_message(stdscr, f"Error: {e}")
+                elif choice == 7:
+                    self._ctui_show_video_probe(stdscr)
+                elif choice == 8:
                     try:
                         run(self._wait_for_dave_status(voice, timeout=max(0.5, self.args.dave_wait_timeout)))
                         self._curses_message(stdscr, self._last_dave_status)
                     except Exception as e:
                         self._curses_message(stdscr, f"Error: {e}")
-                elif choice == 7:
-                    self._curses_show_debug_log(stdscr)
-                elif choice == 8:
-                    self._ctui_show_missed_calls(stdscr)
                 elif choice == 9:
-                    self._ctui_show_call_log(stdscr)
+                    self._curses_show_debug_log(stdscr)
                 elif choice == 10:
+                    self._ctui_show_missed_calls(stdscr)
+                elif choice == 11:
+                    self._ctui_show_call_log(stdscr)
+                elif choice == 12:
                     try:
                         run(self._disconnect_voice(voice))
                     except Exception:
@@ -566,7 +586,7 @@ class VoiceSelfClient(discord.Client):
                     conn = self._ctui_quick_dm_call(stdscr, loop)
                     if conn is not None:
                         voice, label = conn
-                elif choice == 11:
+                elif choice == 13:
                     try:
                         run(self._disconnect_voice(voice))
                     except Exception:
@@ -576,7 +596,7 @@ class VoiceSelfClient(discord.Client):
                     conn = self._ctui_quick_jump(stdscr, loop)
                     if conn is not None:
                         voice, label = conn
-                elif choice in (12, 13):
+                elif choice in (14, 15):
                     try:
                         run(self._disconnect_voice(voice))
                     except Exception:
@@ -944,6 +964,7 @@ class VoiceSelfClient(discord.Client):
             f"  voice_state stream toggles: {self._video_probe_counts.get('voice_state_stream_toggles', 0)}",
             f"  self_video set calls: {self._video_probe_counts.get('self_video_set_calls', 0)}",
             f"  VIDEO opcode sent calls: {self._video_probe_counts.get('video_opcode_sent_calls', 0)}",
+            f"  fake video RTP packets sent: {self._video_probe_counts.get('fake_video_packet_sent_calls', 0)}",
             "",
             "Recent probe events:",
         ]
@@ -1433,6 +1454,9 @@ class VoiceSelfClient(discord.Client):
         if self._video_loop_task is not None:
             self._video_loop_task.cancel()
             self._video_loop_task = None
+        if self._fake_video_loop_task is not None:
+            self._fake_video_loop_task.cancel()
+            self._fake_video_loop_task = None
         if voice.is_playing():
             voice.stop()
         await voice.disconnect(force=True)
@@ -1490,6 +1514,61 @@ class VoiceSelfClient(discord.Client):
 
         self._video_loop_task = asyncio.create_task(_loop())
         self._video_probe_event(f"started VIDEO opcode loop interval={interval}s")
+        return True
+
+    async def _exp_send_fake_video_packet(self, voice: discord.VoiceClient) -> None:
+        conn = getattr(voice, "_connection", None)
+        if conn is None:
+            raise RuntimeError("No voice connection internals available.")
+
+        if self._video_seq is None:
+            self._video_seq = int(getattr(voice, "sequence", 0)) & 0xFFFF
+        if self._video_ts is None:
+            self._video_ts = int(getattr(voice, "timestamp", 0)) & 0xFFFFFFFF
+        if self._video_ssrc is None:
+            self._video_ssrc = int(getattr(voice, "ssrc", 0)) & 0xFFFFFFFF
+
+        pt = max(0, min(127, int(getattr(self.args, "exp_fake_video_pt", 96))))
+        payload_size = max(12, int(getattr(self.args, "exp_fake_video_payload", 900)))
+        second = 0x80 | (pt & 0x7F)
+
+        header = bytearray(12)
+        header[0] = 0x80
+        header[1] = second
+        struct.pack_into(">H", header, 2, self._video_seq)
+        struct.pack_into(">I", header, 4, self._video_ts)
+        struct.pack_into(">I", header, 8, self._video_ssrc)
+
+        payload = b"\x00\x00\x00\x01\x65" + bytes(max(0, payload_size - 5))
+        encrypt_packet = getattr(voice, "_encrypt_" + voice.mode)
+        packet = encrypt_packet(header, payload)
+        conn.send_packet(packet)
+
+        self._video_seq = (self._video_seq + 1) & 0xFFFF
+        self._video_ts = (self._video_ts + 3000) & 0xFFFFFFFF
+        self._video_probe_counts["fake_video_packet_sent_calls"] += 1
+        self._dbg(f"exp fake video RTP sent pt={pt} payload={payload_size}")
+        self._video_probe_event(f"sent fake video RTP pt={pt} payload={payload_size}")
+
+    async def _toggle_fake_video_loop(self, voice: discord.VoiceClient) -> bool:
+        if self._fake_video_loop_task is not None:
+            self._fake_video_loop_task.cancel()
+            self._fake_video_loop_task = None
+            self._video_probe_event("stopped fake video RTP loop")
+            return False
+
+        interval = max(0.05, float(getattr(self.args, "exp_fake_video_interval", 0.2)))
+
+        async def _loop():
+            try:
+                while True:
+                    await self._exp_send_fake_video_packet(voice)
+                    await asyncio.sleep(interval)
+            except asyncio.CancelledError:
+                pass
+
+        self._fake_video_loop_task = asyncio.create_task(_loop())
+        self._video_probe_event(f"started fake video RTP loop interval={interval}s")
         return True
 
     async def _hold_connection(self, voice: discord.VoiceClient, label: str) -> None:
@@ -1960,6 +2039,9 @@ def parse_args() -> argparse.Namespace:
     play.add_argument("--exp-self-stream", action="store_true", help="Experimental placeholder for self stream flag")
     play.add_argument("--exp-video-opcode", action="store_true", help="Experimental: send VOICE VIDEO opcode after connect")
     play.add_argument("--exp-video-loop-interval", type=float, default=2.0, help="Seconds between VIDEO opcode loop sends")
+    play.add_argument("--exp-fake-video-interval", type=float, default=0.2, help="Seconds between fake video RTP sends in loop")
+    play.add_argument("--exp-fake-video-pt", type=int, default=96, help="RTP payload type for fake video packets")
+    play.add_argument("--exp-fake-video-payload", type=int, default=900, help="Fake video RTP payload size in bytes")
 
     dm_play = sub.add_parser("dm-play", help="Start/join DM call and play audio")
     dm_play.add_argument("--user-id", type=int, required=False, help="Target user id for DM call")
@@ -1978,6 +2060,9 @@ def parse_args() -> argparse.Namespace:
     dm_play.add_argument("--exp-self-stream", action="store_true", help="Experimental placeholder for self stream flag")
     dm_play.add_argument("--exp-video-opcode", action="store_true", help="Experimental: send VOICE VIDEO opcode after connect")
     dm_play.add_argument("--exp-video-loop-interval", type=float, default=2.0, help="Seconds between VIDEO opcode loop sends")
+    dm_play.add_argument("--exp-fake-video-interval", type=float, default=0.2, help="Seconds between fake video RTP sends in loop")
+    dm_play.add_argument("--exp-fake-video-pt", type=int, default=96, help="RTP payload type for fake video packets")
+    dm_play.add_argument("--exp-fake-video-payload", type=int, default=900, help="Fake video RTP payload size in bytes")
 
     tui = sub.add_parser("tui", help="Interactive terminal UI for DM/Guild voice connect")
     tui.add_argument("--ring", action="store_true", help="Ring user when starting DM call")
@@ -1993,6 +2078,9 @@ def parse_args() -> argparse.Namespace:
     tui.add_argument("--exp-self-stream", action="store_true", help="Experimental placeholder for self stream flag")
     tui.add_argument("--exp-video-opcode", action="store_true", help="Experimental: send VOICE VIDEO opcode after connect")
     tui.add_argument("--exp-video-loop-interval", type=float, default=2.0, help="Seconds between VIDEO opcode loop sends")
+    tui.add_argument("--exp-fake-video-interval", type=float, default=0.2, help="Seconds between fake video RTP sends in loop")
+    tui.add_argument("--exp-fake-video-pt", type=int, default=96, help="RTP payload type for fake video packets")
+    tui.add_argument("--exp-fake-video-payload", type=int, default=900, help="Fake video RTP payload size in bytes")
 
     ctui = sub.add_parser("ctui", help="Curses full-screen TUI for DM/Guild connect and live control")
     ctui.add_argument("--ring", action="store_true", help="Ring user when starting DM call")
@@ -2009,6 +2097,9 @@ def parse_args() -> argparse.Namespace:
     ctui.add_argument("--exp-self-stream", action="store_true", help="Experimental placeholder for self stream flag")
     ctui.add_argument("--exp-video-opcode", action="store_true", help="Experimental: send VOICE VIDEO opcode after connect")
     ctui.add_argument("--exp-video-loop-interval", type=float, default=2.0, help="Seconds between VIDEO opcode loop sends")
+    ctui.add_argument("--exp-fake-video-interval", type=float, default=0.2, help="Seconds between fake video RTP sends in loop")
+    ctui.add_argument("--exp-fake-video-pt", type=int, default=96, help="RTP payload type for fake video packets")
+    ctui.add_argument("--exp-fake-video-payload", type=int, default=900, help="Fake video RTP payload size in bytes")
     ctui.add_argument("--call-notify-seconds", type=float, default=15.0, help="Incoming-call notice duration in seconds")
     ctui.add_argument("--call-notify-persistent", action="store_true", help="Keep incoming-call notice visible until replaced")
     ctui.add_argument("--call-notify-sound", action="store_true", help="Play terminal bell on incoming call")
