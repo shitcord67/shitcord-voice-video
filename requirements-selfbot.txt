@@ -1,0 +1,1 @@
+discord.py-self[voice]>=2.0.0
