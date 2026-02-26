@@ -59,9 +59,9 @@ class VoiceSelfClient(discord.Client):
             raise RuntimeError(f"Voice channel not found: {self.args.channel_id}")
 
         print(f"Connecting to {guild.name}/{channel.name}...")
-        voice = await channel.connect(reconnect=False, self_deaf=False, self_mute=False)
+        voice = await channel.connect(reconnect=True, self_deaf=False, self_mute=False)
         if self.args.dave_debug or self.args.require_dave:
-            await self._print_dave_status(voice)
+            await self._wait_for_dave_status(voice, timeout=self.args.dave_wait_timeout)
         if self.args.require_dave:
             self._enforce_dave_or_raise(voice)
         await self._play_to_voice_client(voice, f"{guild.name}/{channel.name}")
@@ -76,15 +76,23 @@ class VoiceSelfClient(discord.Client):
             raise RuntimeError(f"Could not open DM channel with user {self.args.user_id}")
 
         print(f"Connecting to DM call with {user} (ring={self.args.ring})...")
-        voice = await dm.connect(reconnect=False, ring=self.args.ring)
+        voice = await dm.connect(reconnect=True, ring=self.args.ring)
         if self.args.dave_debug or self.args.require_dave:
-            await self._print_dave_status(voice)
+            await self._wait_for_dave_status(voice, timeout=self.args.dave_wait_timeout)
         if self.args.require_dave:
             self._enforce_dave_or_raise(voice)
         await self._play_to_voice_client(voice, f"DM:{user}")
 
-    async def _print_dave_status(self, voice: discord.VoiceClient) -> None:
-        await asyncio.sleep(2.0)
+    async def _wait_for_dave_status(self, voice: discord.VoiceClient, *, timeout: float) -> None:
+        deadline = asyncio.get_running_loop().time() + timeout
+        while True:
+            conn = getattr(voice, "_connection", None)
+            can_encrypt = bool(getattr(conn, "can_encrypt", False)) if conn else False
+            now = asyncio.get_running_loop().time()
+            if can_encrypt or now >= deadline:
+                break
+            await asyncio.sleep(0.5)
+
         conn = getattr(voice, "_connection", None)
         if conn is None:
             print("DAVE: no voice connection internals available")
@@ -202,6 +210,7 @@ def parse_args() -> argparse.Namespace:
     play.add_argument("--ffmpeg-path", default=None, help="Path to ffmpeg binary")
     play.add_argument("--dave-debug", action="store_true", help="Print DAVE negotiation status after connect")
     play.add_argument("--require-dave", action="store_true", help="Abort if DAVE is not active/encrypting")
+    play.add_argument("--dave-wait-timeout", type=float, default=10.0, help="Seconds to wait for DAVE encryption readiness")
 
     dm_play = sub.add_parser("dm-play", help="Start/join DM call and play audio")
     dm_play.add_argument("--user-id", type=int, required=False, help="Target user id for DM call")
@@ -213,6 +222,7 @@ def parse_args() -> argparse.Namespace:
     dm_play.add_argument("--ffmpeg-path", default=None, help="Path to ffmpeg binary")
     dm_play.add_argument("--dave-debug", action="store_true", help="Print DAVE negotiation status after connect")
     dm_play.add_argument("--require-dave", action="store_true", help="Abort if DAVE is not active/encrypting")
+    dm_play.add_argument("--dave-wait-timeout", type=float, default=10.0, help="Seconds to wait for DAVE encryption readiness")
 
     args = parser.parse_args()
     cfg = load_local_config(args.config)
