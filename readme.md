@@ -24,6 +24,11 @@ token handling:
 - reads token from `.voice-config.json` or `DISCORD_USER_TOKEN` by default
 - optional override: `./start-selfbot.sh --token <token>`
 
+sixel preview:
+- enable in ctui with: `./start-selfbot.sh -- --sixel`
+- requires SIXEL-capable terminal + `chafa`
+- then press `p` in DM/Guild/user lists to preview avatars/icons
+
 # python selfbot prototype (discord.py-self)
 this is a separate path from the node native module.
 
