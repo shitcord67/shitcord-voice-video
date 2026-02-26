@@ -133,7 +133,16 @@ class VoiceSelfClient(discord.Client):
 
     async def _run_ctui(self) -> None:
         loop = asyncio.get_running_loop()
-        await asyncio.to_thread(self._ctui_thread_main, loop)
+        while True:
+            try:
+                await asyncio.to_thread(self._ctui_thread_main, loop)
+                return
+            except KeyboardInterrupt:
+                return
+            except Exception as e:
+                self._dbg(f"ctui crash: {e!r}")
+                print(f"CTUI crashed: {e}")
+                await asyncio.sleep(0.5)
 
     def _ctui_thread_main(self, loop: asyncio.AbstractEventLoop) -> None:
         curses.wrapper(self._ctui_main, loop)
@@ -149,7 +158,7 @@ class VoiceSelfClient(discord.Client):
 
         while True:
             stdscr.clear()
-            stdscr.addstr(0, 0, f"discord.py-self ctui  user={self.user} ({self.user.id})")
+            self._safe_addstr(stdscr, 0, 0, f"discord.py-self ctui  user={self.user} ({self.user.id})")
             if voice is None:
                 choice = self._curses_menu(
                     stdscr,
@@ -368,7 +377,7 @@ class VoiceSelfClient(discord.Client):
             else:
                 idx = 0
             stdscr.clear()
-            stdscr.addstr(0, 0, title)
+            self._safe_addstr(stdscr, 0, 0, title)
             if title.startswith("Connected:"):
                 status = self._collect_voice_status(voice)
                 self._curses_add_wrapped(stdscr, 1, 0, status)
@@ -376,11 +385,11 @@ class VoiceSelfClient(discord.Client):
                 base = 5
             else:
                 base = 3
-            stdscr.addstr(base - 1, 0, f"Search: {query}")
+            self._safe_addstr(stdscr, base - 1, 0, f"Search: {query}")
             render_items = [items[i] for i in filtered] if filtered else ["(no results)"]
             for i, item in enumerate(render_items):
                 prefix = "> " if i == idx else "  "
-                stdscr.addstr(base + i, 0, f"{prefix}{item}")
+                self._safe_addstr(stdscr, base + i, 0, f"{prefix}{item}")
             stdscr.refresh()
             ch = stdscr.getch()
             if ch in (curses.KEY_UP, ord("k")):
@@ -410,14 +419,28 @@ class VoiceSelfClient(discord.Client):
         safe = text or ""
         while safe and y < max_y:
             chunk = safe[: max_x - x - 1] if max_x - x - 1 > 0 else ""
-            stdscr.addstr(y, x, chunk)
+            self._safe_addstr(stdscr, y, x, chunk)
             safe = safe[len(chunk):]
             y += 1
+
+    def _safe_addstr(self, stdscr, y: int, x: int, text: str) -> None:
+        max_y, max_x = stdscr.getmaxyx()
+        if y < 0 or y >= max_y or x < 0 or x >= max_x:
+            return
+        raw = text or ""
+        limit = max_x - x - 1
+        if limit <= 0:
+            return
+        clipped = raw[:limit]
+        try:
+            stdscr.addstr(y, x, clipped)
+        except curses.error:
+            return
 
     def _curses_prompt(self, stdscr, label: str) -> str:
         curses.echo()
         stdscr.clear()
-        stdscr.addstr(0, 0, f"{label}: ")
+        self._safe_addstr(stdscr, 0, 0, f"{label}: ")
         stdscr.refresh()
         data = stdscr.getstr(0, len(label) + 2).decode("utf-8", errors="ignore").strip()
         curses.noecho()
@@ -425,8 +448,8 @@ class VoiceSelfClient(discord.Client):
 
     def _curses_message(self, stdscr, msg: str) -> None:
         stdscr.clear()
-        stdscr.addstr(0, 0, msg)
-        stdscr.addstr(2, 0, "Press any key...")
+        self._safe_addstr(stdscr, 0, 0, msg)
+        self._safe_addstr(stdscr, 2, 0, "Press any key...")
         stdscr.refresh()
         stdscr.getch()
 
@@ -552,12 +575,12 @@ class VoiceSelfClient(discord.Client):
         pos = max(0, len(lines) - 1)
         while True:
             stdscr.clear()
-            stdscr.addstr(0, 0, "Debug log (j/k scroll, q exit)")
+            self._safe_addstr(stdscr, 0, 0, "Debug log (j/k scroll, q exit)")
             max_y, max_x = stdscr.getmaxyx()
             view_h = max(1, max_y - 2)
             start = max(0, min(pos - view_h + 1, len(lines) - view_h))
             for row, line in enumerate(lines[start : start + view_h], start=1):
-                stdscr.addstr(row, 0, line[: max_x - 1])
+                self._safe_addstr(stdscr, row, 0, line[: max_x - 1])
             stdscr.refresh()
             ch = stdscr.getch()
             if ch in (ord("q"), 27):
