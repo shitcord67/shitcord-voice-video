@@ -4,6 +4,7 @@ import asyncio
 import json
 import os
 import shutil
+import subprocess
 import sys
 from typing import Optional
 
@@ -87,20 +88,29 @@ class VoiceSelfClient(discord.Client):
 
     async def _run_tui(self) -> None:
         print(f"Logged in as: {self.user} ({self.user.id})")
+        self._tui_configure_audio()
         while True:
             root = self._select_menu("Choose target type", ["DM", "Guild", "Quit"])
             if root == 2:
                 return
 
             if root == 0:
-                mode = self._select_menu("DM mode", ["Input ID", "List", "Back"])
-                if mode == 2:
-                    continue
-                if mode == 0:
-                    user_id = self._prompt_int("User ID")
-                    await self._connect_dm_by_user_id(user_id)
-                else:
-                    await self._connect_dm_from_list()
+                while True:
+                    mode = self._select_menu(
+                        "DM mode",
+                        ["Input ID", "List", f"Toggle ring (currently {'ON' if self.args.ring else 'OFF'})", "Back"],
+                    )
+                    if mode == 3:
+                        break
+                    if mode == 2:
+                        self.args.ring = not self.args.ring
+                        print(f"DM ring is now {'ON' if self.args.ring else 'OFF'}.")
+                        continue
+                    if mode == 0:
+                        user_id = self._prompt_int("User ID")
+                        await self._connect_dm_by_user_id(user_id)
+                    else:
+                        await self._connect_dm_from_list()
             else:
                 mode = self._select_menu("Guild mode", ["Input ID", "List", "Back"])
                 if mode == 2:
@@ -122,7 +132,7 @@ class VoiceSelfClient(discord.Client):
         print(f"Connecting to DM call with {user} (ring={self.args.ring})...")
         voice = await dm.connect(reconnect=True, ring=self.args.ring)
         await self._after_connect_dave_checks(voice)
-        await self._hold_connection(voice, f"DM:{user}")
+        await self._handle_connected_voice(voice, f"DM:{user}")
 
     async def _connect_dm_from_list(self) -> None:
         dm_channels = [ch for ch in self.private_channels if isinstance(ch, discord.DMChannel)]
@@ -144,7 +154,7 @@ class VoiceSelfClient(discord.Client):
         print(f"Connecting to DM call with {recipient_label} (ring={self.args.ring})...")
         voice = await chosen.connect(reconnect=True, ring=self.args.ring)
         await self._after_connect_dave_checks(voice)
-        await self._hold_connection(voice, f"DM:{recipient_label}")
+        await self._handle_connected_voice(voice, f"DM:{recipient_label}")
 
     async def _connect_guild_voice(self, guild_id: int, channel_id: int) -> None:
         guild = self.get_guild(guild_id)
@@ -156,7 +166,7 @@ class VoiceSelfClient(discord.Client):
         print(f"Connecting to {guild.name}/{channel.name}...")
         voice = await channel.connect(reconnect=True, self_deaf=False, self_mute=False)
         await self._after_connect_dave_checks(voice)
-        await self._hold_connection(voice, f"{guild.name}/{channel.name}")
+        await self._handle_connected_voice(voice, f"{guild.name}/{channel.name}")
 
     async def _connect_guild_from_list(self) -> None:
         guilds = sorted(self.guilds, key=lambda g: g.name.lower())
@@ -181,7 +191,7 @@ class VoiceSelfClient(discord.Client):
         print(f"Connecting to {guild.name}/{channel.name}...")
         voice = await channel.connect(reconnect=True, self_deaf=False, self_mute=False)
         await self._after_connect_dave_checks(voice)
-        await self._hold_connection(voice, f"{guild.name}/{channel.name}")
+        await self._handle_connected_voice(voice, f"{guild.name}/{channel.name}")
 
     async def _after_connect_dave_checks(self, voice: discord.VoiceClient) -> None:
         if self.args.dave_debug or self.args.require_dave:
@@ -198,6 +208,12 @@ class VoiceSelfClient(discord.Client):
             print("Disconnecting...")
         finally:
             await voice.disconnect(force=True)
+
+    async def _handle_connected_voice(self, voice: discord.VoiceClient, label: str) -> None:
+        if self.args.mode in ("file", "noise", "mic"):
+            await self._play_to_voice_client(voice, label)
+        else:
+            await self._hold_connection(voice, label)
 
     def _select_menu(self, title: str, items: list[str]) -> int:
         print(f"\n{title}:")
@@ -217,6 +233,75 @@ class VoiceSelfClient(discord.Client):
             if raw.isdigit():
                 return int(raw)
             print("Invalid number.")
+
+    def _tui_configure_audio(self) -> None:
+        print("\nAudio setup:")
+        mode_idx = self._select_menu("Select audio mode", ["File", "Noise", "Microphone", "Connect only"])
+        if mode_idx == 0:
+            self.args.mode = "file"
+            path = input(f"File path [{self.args.file}]: ").strip()
+            if path:
+                self.args.file = path
+            loop_idx = self._select_menu("Loop file playback?", ["Yes", "No"])
+            self.args.loop = loop_idx == 0
+        elif mode_idx == 1:
+            self.args.mode = "noise"
+            amp = input(f"Noise amplitude 0..1 [{self.args.noise_amp}]: ").strip()
+            if amp:
+                try:
+                    self.args.noise_amp = float(amp)
+                except ValueError:
+                    print("Invalid amplitude, keeping default.")
+            self.args.loop = False
+        elif mode_idx == 2:
+            self.args.mode = "mic"
+            self.args.loop = False
+            self.args.pulse_source = self._select_pulse_device("sources", "input source", self.args.pulse_source)
+        else:
+            self.args.mode = "connect"
+            self.args.loop = False
+
+        sink_idx = self._select_menu("Set PulseAudio output sink?", ["Keep current", "Choose sink"])
+        if sink_idx == 1:
+            sink = self._select_pulse_device("sinks", "output sink", self.args.pulse_sink)
+            if sink:
+                self.args.pulse_sink = sink
+                self._set_default_pulse_device("sink", sink)
+                print(f"Pulse default sink set to: {sink}")
+
+        if self.args.mode == "mic" and self.args.pulse_source:
+            self._set_default_pulse_device("source", self.args.pulse_source)
+            print(f"Pulse default source set to: {self.args.pulse_source}")
+
+    def _pulse_devices(self, kind: str) -> list[str]:
+        try:
+            out = subprocess.check_output(["pactl", "list", "short", kind], text=True, stderr=subprocess.DEVNULL)
+        except Exception:
+            return []
+        devices = []
+        for line in out.splitlines():
+            parts = line.split("\t")
+            if len(parts) >= 2:
+                devices.append(parts[1].strip())
+        return devices
+
+    def _select_pulse_device(self, kind: str, label: str, current: Optional[str]) -> Optional[str]:
+        devices = self._pulse_devices(kind)
+        if not devices:
+            manual = input(f"No PulseAudio {label}s found. Enter {label} name manually (blank to skip): ").strip()
+            return manual or current
+        opts = [f"{name}{' (current)' if current == name else ''}" for name in devices]
+        idx = self._select_menu(f"Select {label}", opts + ["Manual input", "Keep current"])
+        if idx == len(opts):
+            manual = input(f"Enter {label} name: ").strip()
+            return manual or current
+        if idx == len(opts) + 1:
+            return current
+        return devices[idx]
+
+    def _set_default_pulse_device(self, kind: str, name: str) -> None:
+        cmd = ["pactl", f"set-default-{kind}", name]
+        subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     async def _wait_for_dave_status(self, voice: discord.VoiceClient, *, timeout: float) -> None:
         deadline = asyncio.get_running_loop().time() + timeout
@@ -264,14 +349,22 @@ class VoiceSelfClient(discord.Client):
             return discord.FFmpegPCMAudio(
                 source=self.args.file,
                 executable=ffmpeg,
-                options="-vn -ac 2 -ar 48000",
+                options="-vn",
+            )
+        if self.args.mode == "mic":
+            source_name = self.args.pulse_source or "default"
+            return discord.FFmpegPCMAudio(
+                source=source_name,
+                executable=ffmpeg,
+                before_options="-f pulse -thread_queue_size 1024",
+                options="-vn",
             )
 
         return discord.FFmpegPCMAudio(
             source=f"anoisesrc=color=white:amplitude={self.args.noise_amp}:sample_rate=48000",
             executable=ffmpeg,
             before_options="-f lavfi -re",
-            options="-vn -ac 2 -ar 48000",
+            options="-vn",
         )
 
     async def _play_to_voice_client(self, voice: discord.VoiceClient, label: str) -> None:
@@ -283,6 +376,8 @@ class VoiceSelfClient(discord.Client):
         source = self._make_audio_source(ffmpeg)
         if self.args.mode == "file":
             print(f"Playing file to {label} (loop={self.args.loop}): {self.args.file}")
+        elif self.args.mode == "mic":
+            print(f"Streaming microphone to {label} (pulse_source={self.args.pulse_source or 'default'})")
         else:
             print(f"Playing generated noise to {label} (amp={self.args.noise_amp})")
 
@@ -343,6 +438,8 @@ def parse_args() -> argparse.Namespace:
     play.add_argument("--loop", action="store_true", help="Loop file playback")
     play.add_argument("--noise-amp", type=float, default=0.08, help="Noise amplitude (0.0-1.0)")
     play.add_argument("--ffmpeg-path", default=None, help="Path to ffmpeg binary")
+    play.add_argument("--pulse-source", default=None, help="PulseAudio source name (used with --mode mic)")
+    play.add_argument("--pulse-sink", default=None, help="PulseAudio sink name to set as default")
     play.add_argument("--dave-debug", action="store_true", help="Print DAVE negotiation status after connect")
     play.add_argument("--require-dave", action="store_true", help="Abort if DAVE is not active/encrypting")
     play.add_argument("--dave-wait-timeout", type=float, default=10.0, help="Seconds to wait for DAVE encryption readiness")
@@ -350,17 +447,24 @@ def parse_args() -> argparse.Namespace:
     dm_play = sub.add_parser("dm-play", help="Start/join DM call and play audio")
     dm_play.add_argument("--user-id", type=int, required=False, help="Target user id for DM call")
     dm_play.add_argument("--ring", action="store_true", help="Ring user when starting DM call")
-    dm_play.add_argument("--mode", choices=["file", "noise"], default="file")
+    dm_play.add_argument("--mode", choices=["file", "noise", "mic"], default="file")
     dm_play.add_argument("--file", default="rickroll.ogg", help="Audio file path when --mode file")
     dm_play.add_argument("--loop", action="store_true", help="Loop file playback")
     dm_play.add_argument("--noise-amp", type=float, default=0.08, help="Noise amplitude (0.0-1.0)")
     dm_play.add_argument("--ffmpeg-path", default=None, help="Path to ffmpeg binary")
+    dm_play.add_argument("--pulse-source", default=None, help="PulseAudio source name (used with --mode mic)")
+    dm_play.add_argument("--pulse-sink", default=None, help="PulseAudio sink name to set as default")
     dm_play.add_argument("--dave-debug", action="store_true", help="Print DAVE negotiation status after connect")
     dm_play.add_argument("--require-dave", action="store_true", help="Abort if DAVE is not active/encrypting")
     dm_play.add_argument("--dave-wait-timeout", type=float, default=10.0, help="Seconds to wait for DAVE encryption readiness")
 
     tui = sub.add_parser("tui", help="Interactive terminal UI for DM/Guild voice connect")
     tui.add_argument("--ring", action="store_true", help="Ring user when starting DM call")
+    tui.add_argument("--file", default="rickroll.ogg", help="Default file path in TUI file mode")
+    tui.add_argument("--noise-amp", type=float, default=0.08, help="Default noise amplitude in TUI noise mode")
+    tui.add_argument("--pulse-source", default=None, help="Default PulseAudio source for TUI microphone mode")
+    tui.add_argument("--pulse-sink", default=None, help="Default PulseAudio sink")
+    tui.add_argument("--ffmpeg-path", default=None, help="Path to ffmpeg binary")
     tui.add_argument("--dave-debug", action="store_true", help="Print DAVE negotiation status after connect")
     tui.add_argument("--require-dave", action="store_true", help="Abort if DAVE is not active/encrypting")
     tui.add_argument("--dave-wait-timeout", type=float, default=10.0, help="Seconds to wait for DAVE encryption readiness")
