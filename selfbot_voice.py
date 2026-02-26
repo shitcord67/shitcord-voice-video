@@ -604,7 +604,7 @@ class VoiceSelfClient(discord.Client):
         preview_callback: Optional[Callable[[int], None]] = None,
         key_actions: Optional[dict[int, Callable[[int], None]]] = None,
         allow_ctrl_k: bool = False,
-        refresh_ms: int = 500,
+        refresh_ms: int = 5000,
     ) -> int:
         idx = 0
         query = ""
