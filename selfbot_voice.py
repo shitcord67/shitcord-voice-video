@@ -347,7 +347,7 @@ class VoiceSelfClient(discord.Client):
                         dm_channels = sorted(dm_channels, key=lambda c: str(c.recipient).lower() if c.recipient else "")
                         labels = [
                             (
-                                f"{ch.recipient} ({ch.recipient.id}) [{self._dm_call_status(ch)}]"
+                                f"{ch.recipient} ({ch.recipient.id}) [{self._dm_call_status(ch)}]{self._dm_media_suffix(ch)}"
                                 if ch.recipient
                                 else f"unknown ({ch.id}) [{self._dm_call_status(ch)}]"
                             )
@@ -924,11 +924,17 @@ class VoiceSelfClient(discord.Client):
             vs = getattr(member, "voice", None)
             mic_muted = bool(getattr(vs, "self_mute", False) or getattr(vs, "mute", False) or getattr(vs, "suppress", False))
             spk_deaf = bool(getattr(vs, "self_deaf", False) or getattr(vs, "deaf", False))
+            cam_on = bool(getattr(vs, "self_video", False))
+            stream_on = bool(getattr(vs, "self_stream", False))
             talking = self._is_user_talking(member.id)
             talk_mark = "*" if talking else "."
             mic_mark = "MUTED" if mic_muted else "open"
             spk_mark = "DEAF" if spk_deaf else "on"
-            lines.append(f"  {talk_mark} mic={mic_mark:<5} spk={spk_mark:<4} {member} ({member.id})")
+            cam_mark = "on" if cam_on else "off"
+            stream_mark = "on" if stream_on else "off"
+            lines.append(
+                f"  {talk_mark} mic={mic_mark:<5} spk={spk_mark:<4} cam={cam_mark:<3} scr={stream_mark:<3} {member} ({member.id})"
+            )
             if len(lines) >= limit:
                 break
         if not lines:
@@ -972,13 +978,31 @@ class VoiceSelfClient(discord.Client):
             return "call-active"
         return "call-open"
 
+    def _dm_media_suffix(self, dm: discord.DMChannel) -> str:
+        call = getattr(dm, "call", None)
+        recipient = getattr(dm, "recipient", None)
+        if call is None or recipient is None:
+            return ""
+        try:
+            vs_map = getattr(call, "voice_states", {}) or {}
+            vs = vs_map.get(int(recipient.id))
+        except Exception:
+            vs = None
+        if vs is None:
+            return ""
+        cam_on = bool(getattr(vs, "self_video", False))
+        stream_on = bool(getattr(vs, "self_stream", False))
+        if not cam_on and not stream_on:
+            return ""
+        return f" cam={'on' if cam_on else 'off'} scr={'on' if stream_on else 'off'}"
+
     def _dm_voice_front_lines(self, limit: int = 4) -> list[str]:
         dms = [ch for ch in self.private_channels if isinstance(ch, discord.DMChannel)]
         active: list[tuple[str, str]] = []
         for dm in dms:
             status = self._dm_call_status(dm)
             if status not in ("idle", "unavailable"):
-                who = str(dm.recipient) if dm.recipient else f"dm:{dm.id}"
+                who = (str(dm.recipient) if dm.recipient else f"dm:{dm.id}") + self._dm_media_suffix(dm)
                 active.append((who, status))
         active.sort(key=lambda x: x[0].lower())
         if not active:
