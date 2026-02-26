@@ -327,12 +327,13 @@ class VoiceSelfClient(discord.Client):
             self.args.loop = False
         elif mode == 2:
             self.args.mode = "mic"
-            sources = self._pulse_devices("sources")
-            if sources:
-                idx = self._curses_menu(stdscr, "Select Pulse source", sources + ["Manual", "Back"])
-                if idx < len(sources):
-                    self.args.pulse_source = sources[idx]
-                elif idx == len(sources):
+            source_entries = self._pulse_device_entries("sources")
+            source_labels = [f"{desc} [{name}]" for name, desc in source_entries]
+            if source_entries:
+                idx = self._curses_menu(stdscr, "Select Pulse source", source_labels + ["Manual", "Back"])
+                if idx < len(source_entries):
+                    self.args.pulse_source = source_entries[idx][0]
+                elif idx == len(source_entries):
                     manual = self._curses_prompt(stdscr, "Pulse source name")
                     if manual:
                         self.args.pulse_source = manual
@@ -345,13 +346,14 @@ class VoiceSelfClient(discord.Client):
             self.args.mode = "connect"
             self.args.loop = False
 
-        sinks = self._pulse_devices("sinks")
-        if sinks:
-            idx = self._curses_menu(stdscr, "Output sink", ["Keep current"] + sinks + ["Manual"])
-            if idx >= 1 and idx <= len(sinks):
-                self.args.pulse_sink = sinks[idx - 1]
+        sink_entries = self._pulse_device_entries("sinks")
+        sink_labels = [f"{desc} [{name}]" for name, desc in sink_entries]
+        if sink_entries:
+            idx = self._curses_menu(stdscr, "Output sink", ["Keep current"] + sink_labels + ["Manual"])
+            if idx >= 1 and idx <= len(sink_entries):
+                self.args.pulse_sink = sink_entries[idx - 1][0]
                 self._set_default_pulse_device("sink", self.args.pulse_sink)
-            elif idx == len(sinks) + 1:
+            elif idx == len(sink_entries) + 1:
                 manual = self._curses_prompt(stdscr, "Pulse sink name")
                 if manual:
                     self.args.pulse_sink = manual
@@ -1002,44 +1004,96 @@ class VoiceSelfClient(discord.Client):
             self._set_default_pulse_device("source", self.args.pulse_source)
             print(f"Pulse default source set to: {self.args.pulse_source}")
 
-    def _pulse_devices(self, kind: str) -> list[str]:
+    def _pulse_device_entries(self, kind: str) -> list[tuple[str, str]]:
+        if kind not in ("sources", "sinks"):
+            return []
+        try:
+            out = subprocess.check_output(["pactl", "list", kind], text=True, stderr=subprocess.DEVNULL)
+        except Exception:
+            return self._pulse_device_entries_short(kind)
+        entries: list[tuple[str, str]] = []
+        current_name: Optional[str] = None
+        current_desc: Optional[str] = None
+        for raw in out.splitlines():
+            line = raw.strip()
+            if line.startswith(("Source #", "Sink #")):
+                if current_name:
+                    entries.append((current_name, current_desc or current_name))
+                current_name = None
+                current_desc = None
+                continue
+            if line.startswith("Name:"):
+                current_name = line.split(":", 1)[1].strip()
+                continue
+            if line.startswith("Description:"):
+                current_desc = line.split(":", 1)[1].strip()
+                continue
+        if current_name:
+            entries.append((current_name, current_desc or current_name))
+
+        # De-duplicate by device name while preserving first occurrence.
+        seen = set()
+        deduped: list[tuple[str, str]] = []
+        for name, desc in entries:
+            if name in seen:
+                continue
+            seen.add(name)
+            deduped.append((name, desc))
+        if deduped:
+            return deduped
+        return self._pulse_device_entries_short(kind)
+
+    def _pulse_device_entries_short(self, kind: str) -> list[tuple[str, str]]:
         try:
             out = subprocess.check_output(["pactl", "list", "short", kind], text=True, stderr=subprocess.DEVNULL)
         except Exception:
             return []
-        devices = []
+        entries: list[tuple[str, str]] = []
+        seen = set()
         for line in out.splitlines():
             parts = line.split("\t")
             if len(parts) >= 2:
-                devices.append(parts[1].strip())
-        return devices
+                name = parts[1].strip()
+                if name in seen:
+                    continue
+                seen.add(name)
+                entries.append((name, name))
+        return entries
+
+    def _pulse_devices(self, kind: str) -> list[str]:
+        return [name for name, _ in self._pulse_device_entries(kind)]
 
     def _select_pulse_device(self, kind: str, label: str, current: Optional[str]) -> Optional[str]:
-        devices = self._pulse_devices(kind)
-        if not devices:
+        entries = self._pulse_device_entries(kind)
+        if not entries:
             manual = input(f"No PulseAudio {label}s found. Enter {label} name manually (blank to skip): ").strip()
             return manual or current
-        opts = [f"{name}{' (current)' if current == name else ''}" for name in devices]
+        opts = []
+        for name, desc in entries:
+            item = f"{desc} [{name}]"
+            if current == name:
+                item += " (current)"
+            opts.append(item)
         idx = self._select_menu(f"Select {label}", opts + ["Manual input", "Keep current"])
         if idx == len(opts):
             manual = input(f"Enter {label} name: ").strip()
             return manual or current
         if idx == len(opts) + 1:
             return current
-        return devices[idx]
+        return entries[idx][0]
 
     def _set_default_pulse_device(self, kind: str, name: str) -> None:
         cmd = ["pactl", f"set-default-{kind}", name]
         subprocess.run(cmd, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
     def _print_pulse_devices(self, kind: str) -> None:
-        devices = self._pulse_devices(kind)
-        if not devices:
+        entries = self._pulse_device_entries(kind)
+        if not entries:
             print(f"No PulseAudio {kind} found.")
             return
         print(f"PulseAudio {kind}:")
-        for dev in devices:
-            print(f"  - {dev}")
+        for name, desc in entries:
+            print(f"  - {desc} [{name}]")
 
     async def _wait_for_dave_status(self, voice: discord.VoiceClient, *, timeout: float) -> None:
         deadline = asyncio.get_running_loop().time() + timeout
